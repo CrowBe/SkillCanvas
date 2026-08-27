@@ -12,6 +12,7 @@ import {
 } from "../instruction-map";
 import {
   invokeMockTool,
+  schemaSubsetError,
   prepareTestRun,
   prepareTriggering,
   submitTestRun,
@@ -250,14 +251,13 @@ export function createWorkspaceService(
           );
         const contractError = toolContractError(options.contract);
         if (contractError) return err("invalid_submission", contractError);
-        if (
-          options.responseSchema !== undefined &&
-          !isSchemaObject(options.responseSchema)
-        )
-          return err(
-            "invalid_submission",
-            "The response schema must be an object.",
+        if (options.responseSchema !== undefined) {
+          const schemaError = schemaSubsetError(
+            options.responseSchema,
+            "responseSchema",
           );
+          if (schemaError) return err("invalid_submission", schemaError);
+        }
         evaluation = prepareTestRun(
           bundle.value,
           options.contract,
@@ -482,8 +482,16 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       );
     const references: { path: string; content: string }[] = [];
     for (const reference of revision.references) {
-      const content = blobs.get(reference.contentHash);
-      if (typeof reference.path !== "string" || content === undefined)
+      const content =
+        reference && typeof reference === "object"
+          ? blobs.get(reference.contentHash)
+          : undefined;
+      if (
+        !reference ||
+        typeof reference !== "object" ||
+        typeof reference.path !== "string" ||
+        content === undefined
+      )
         return err(
           "invalid_snapshot",
           `Revision ${revision.revision} has an invalid reference pointer.`,
@@ -514,5 +522,8 @@ function toolContractError(contract: unknown): string | null {
     return "The Tool contract requires an inputSchema object.";
   if (!isSchemaObject(candidate.outputSchema))
     return "The Tool contract requires an outputSchema object.";
-  return null;
+  return (
+    schemaSubsetError(candidate.inputSchema, "inputSchema") ??
+    schemaSubsetError(candidate.outputSchema, "outputSchema")
+  );
 }

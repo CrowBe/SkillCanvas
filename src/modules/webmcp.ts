@@ -93,7 +93,28 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
     const result = await runtime.service.open(workspaceId);
     if (result.ok) mutate(result.value);
   };
-  return [
+  const guard = (tool: WebMcpTool): WebMcpTool => ({
+    ...tool,
+    execute: async (input, options) => {
+      try {
+        return await tool.execute(input, options);
+      } catch (error) {
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          ok: false,
+          workspaceId: runtime.selection.get(),
+          revision: null,
+          contentHash: null,
+          error: {
+            code: "invalid_submission",
+            message:
+              error instanceof Error ? error.message : "Tool call failed.",
+          },
+        };
+      }
+    },
+  });
+  const handlers: readonly WebMcpTool[] = [
     {
       name: "skill_open",
       title: "Open Skill",
@@ -405,6 +426,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       },
     },
   ];
+  return handlers.map(guard);
 }
 
 export async function registerWebMcpTools(
