@@ -6,6 +6,7 @@ import {
   sha256,
   type Result,
 } from "./shared";
+import { parseSkillMd } from "./skill";
 import type { EvaluationRecord, WorkspaceBundle } from "./workspace/types";
 
 export const PROMPT_BATTERY_VERSION = "prompt-battery/1";
@@ -394,8 +395,12 @@ function field(raw: string, key: string): string {
   );
 }
 function nameFrom(raw: string): string {
-  return field(raw, "name");
+  const parsed = parseSkillMd(raw);
+  return parsed.ok ? parsed.value.frontmatter.name : field(raw, "name");
 }
 function descriptionFrom(raw: string): string {
-  return field(raw, "description");
+  const parsed = parseSkillMd(raw);
+  return parsed.ok
+    ? parsed.value.frontmatter.description
+    : field(raw, "description");
 }

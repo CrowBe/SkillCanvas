@@ -63,6 +63,22 @@ export function validateInstructionMap(
         "invalid_instruction_map",
         `Unknown parent scope: ${scope.parentId}`,
       );
+  const parents = new Map(
+    map.scopes.map((scope) => [scope.id, scope.parentId]),
+  );
+  for (const scope of map.scopes) {
+    const seen = new Set<string>([scope.id]);
+    let parentId = parents.get(scope.id);
+    while (parentId) {
+      if (seen.has(parentId))
+        return err(
+          "invalid_instruction_map",
+          `Scope hierarchy contains a cycle at ${parentId}.`,
+        );
+      seen.add(parentId);
+      parentId = parents.get(parentId);
+    }
+  }
   for (const requirement of map.requirements) {
     const { start, end } = requirement.sourceSpan;
     if (
