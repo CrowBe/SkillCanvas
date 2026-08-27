@@ -68,7 +68,7 @@ export interface WorkspaceService {
   ): Promise<Result<{ lint?: LintArtifact; structure?: StructureArtifact }>>;
   submitInstructionMap(
     workspaceId: string,
-    map: InstructionMap,
+    map: unknown,
     accept: boolean,
   ): Promise<
     Result<{
@@ -247,6 +247,16 @@ export function createWorkspaceService(
           return err(
             "invalid_submission",
             "A Tool contract is required for a test run.",
+          );
+        const contractError = toolContractError(options.contract);
+        if (contractError) return err("invalid_submission", contractError);
+        if (
+          options.responseSchema !== undefined &&
+          !isSchemaObject(options.responseSchema)
+        )
+          return err(
+            "invalid_submission",
+            "The response schema must be an object.",
           );
         evaluation = prepareTestRun(
           bundle.value,
@@ -484,4 +494,25 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
     if (!validated.ok) return validated;
   }
   return ok(snapshot as WorkspaceSnapshot);
+}
+
+function isSchemaObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toolContractError(contract: unknown): string | null {
+  if (!isSchemaObject(contract)) return "The Tool contract must be an object.";
+  const candidate = contract as Record<string, unknown>;
+  if (typeof candidate.name !== "string" || candidate.name.trim() === "")
+    return "The Tool contract requires a name.";
+  if (
+    candidate.description !== undefined &&
+    typeof candidate.description !== "string"
+  )
+    return "The Tool contract description must be a string.";
+  if (!isSchemaObject(candidate.inputSchema))
+    return "The Tool contract requires an inputSchema object.";
+  if (!isSchemaObject(candidate.outputSchema))
+    return "The Tool contract requires an outputSchema object.";
+  return null;
 }

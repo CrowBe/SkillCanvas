@@ -487,11 +487,16 @@ export async function registerWebMcpTools(
       dispose: () => controller.abort(),
       registerMock,
     };
-  await Promise.all(
-    tools.map((tool) =>
-      context.registerTool(tool, { signal: controller.signal }),
-    ),
-  );
+  try {
+    await Promise.all(
+      tools.map((tool) =>
+        context.registerTool(tool, { signal: controller.signal }),
+      ),
+    );
+  } catch (error) {
+    controller.abort();
+    throw error;
+  }
   return {
     available: true,
     tools,
