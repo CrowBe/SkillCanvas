@@ -152,8 +152,35 @@ export async function prepareTriggering(
 
 export function submitTriggering(
   record: EvaluationRecord,
-  input: { caseId: string; selectedChoiceId: string; rationale: string },
+  submission: unknown,
 ): Result<EvaluationRecord> {
+  if (
+    typeof submission !== "object" ||
+    submission === null ||
+    Array.isArray(submission)
+  )
+    return err(
+      "invalid_submission",
+      "A triggering submission must be an object.",
+    );
+  const input = submission as {
+    caseId?: unknown;
+    selectedChoiceId?: unknown;
+    rationale?: unknown;
+  };
+  if (
+    typeof input.caseId !== "string" ||
+    typeof input.selectedChoiceId !== "string"
+  )
+    return err(
+      "invalid_submission",
+      "A triggering submission requires a caseId and selectedChoiceId.",
+    );
+  if (typeof input.rationale !== "string")
+    return err(
+      "invalid_submission",
+      "Rationale must be 3\u2013300 characters.",
+    );
   const data = record.data as TriggeringRunData;
   if (record.status === "complete")
     return err(
@@ -304,11 +331,57 @@ export function submitTestRun(
   });
 }
 
+const SCHEMA_TYPES: readonly string[] = [
+  "object",
+  "array",
+  "string",
+  "number",
+  "integer",
+  "boolean",
+  "null",
+];
+
+function isSchemaNode(value: unknown): value is JsonSchema {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function schemaSubsetError(schema: unknown, path = "$"): string | null {
+  if (!isSchemaNode(schema)) return `${path} must be a JSON Schema object.`;
+  if (
+    schema.type !== undefined &&
+    !SCHEMA_TYPES.includes(schema.type as string)
+  )
+    return `${path}.type is not a supported JSON Schema type.`;
+  if (schema.required !== undefined) {
+    if (
+      !Array.isArray(schema.required) ||
+      schema.required.some((key) => typeof key !== "string")
+    )
+      return `${path}.required must be an array of property names.`;
+  }
+  if (schema.enum !== undefined && !Array.isArray(schema.enum))
+    return `${path}.enum must be an array.`;
+  if (schema.properties !== undefined) {
+    if (!isSchemaNode(schema.properties))
+      return `${path}.properties must be an object.`;
+    for (const [key, child] of Object.entries(schema.properties)) {
+      const issue = schemaSubsetError(child, `${path}.${key}`);
+      if (issue) return issue;
+    }
+  }
+  if (schema.items !== undefined) {
+    const issue = schemaSubsetError(schema.items, `${path}[]`);
+    if (issue) return issue;
+  }
+  return null;
+}
+
 export function validateSchema(
   value: unknown,
   schema: JsonSchema,
   path = "$",
 ): readonly string[] {
+  if (!isSchemaNode(schema)) return [];
   const issues: string[] = [];
   const type = schema.type;
   const validType =
@@ -361,6 +434,7 @@ export function validateSchema(
 }
 
 export function exampleFromSchema(schema: JsonSchema): unknown {
+  if (!isSchemaNode(schema)) return {};
   if ("default" in schema) return schema.default;
   if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
   switch (schema.type) {

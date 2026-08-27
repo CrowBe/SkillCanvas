@@ -175,3 +175,33 @@ describe("WebMCP registration failures", () => {
     expect([...live.values()].every((count) => count === 0)).toBe(true);
   });
 });
+
+describe("WebMCP envelope guarantees", () => {
+  it("returns the ok:false envelope when a tool handler throws", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    let current: string | null = null;
+    const handlers = createToolHandlers({
+      service: {
+        ...service,
+        open: () => {
+          throw new Error("store exploded");
+        },
+      },
+      appearance: appearance(),
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
+    });
+    current = "workspace-1";
+    const submit = handlers.find((tool) => tool.name === "evaluation_submit")!;
+    const envelope = await execute(submit, {
+      evaluationId: "eval-1",
+      submission: {},
+    });
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.message).toContain("store exploded");
+  });
+});

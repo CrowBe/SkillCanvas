@@ -148,3 +148,54 @@ describe("WorkspaceService input validation", () => {
     if (!result.ok) expect(result.error.code).toBe("invalid_submission");
   });
 });
+
+describe("WorkspaceService schema and submission guards", () => {
+  it("rejects a contract whose nested schema is malformed instead of throwing", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const result = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      {
+        contract: {
+          name: "t",
+          description: "t",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object", properties: { a: null } },
+        } as never,
+      },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("invalid_submission");
+    const stringProperties = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      {
+        contract: {
+          name: "t",
+          description: "t",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object", properties: "abc" },
+        } as never,
+      },
+    );
+    expect(stringProperties.ok).toBe(false);
+  });
+
+  it("returns a typed error for a triggering submission without a rationale", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const prepared = await service.prepareEvaluation(id, "triggering");
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const caseId = (prepared.value.data as any).cases[0].id;
+    const result = await service.submitEvaluation(id, prepared.value.id, {
+      caseId,
+      selectedChoiceId: "candidate",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("invalid_submission");
+  });
+});
