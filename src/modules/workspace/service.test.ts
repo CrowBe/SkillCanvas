@@ -305,3 +305,32 @@ describe("snapshot import evaluation data guards", () => {
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });
 });
+
+describe("snapshot import triggering case guards", () => {
+  it("rejects a triggering case whose expected value is missing or unknown", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const prepared = await service.prepareEvaluation(id, "triggering");
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const exported = await service.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    for (const mutate of [
+      (item: any) => delete item.expected,
+      (item: any) => {
+        item.expected = "maybe";
+      },
+    ]) {
+      const snapshot = JSON.parse(exported.value);
+      const triggering = snapshot.evaluations.find(
+        (item: any) => item.kind === "triggering",
+      );
+      mutate(triggering.data.cases[0]);
+      const importer = createWorkspaceService(new MemoryWorkspaceStore());
+      const imported = await importer.importSnapshot(JSON.stringify(snapshot));
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+});

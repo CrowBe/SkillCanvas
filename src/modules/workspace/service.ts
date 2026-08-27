@@ -551,9 +551,13 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
       if (
         !isSchemaObject(item) ||
         typeof (item as Record<string, unknown>).id !== "string" ||
+        typeof (item as Record<string, unknown>).prompt !== "string" ||
         !Array.isArray((item as Record<string, unknown>).choices)
       )
-        return "a triggering case requires an id and a choices array.";
+        return "a triggering case requires an id, a prompt, and a choices array.";
+      const expected = (item as Record<string, unknown>).expected;
+      if (expected !== "fire" && expected !== "silent")
+        return 'a triggering case expects exactly "fire" or "silent".';
       for (const choice of (item as { choices: unknown[] }).choices)
         if (
           !isSchemaObject(choice) ||
