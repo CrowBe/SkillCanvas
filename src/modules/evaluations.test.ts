@@ -1,0 +1,75 @@
+import { describe, expect, it } from "vitest";
+import {
+  exampleFromSchema,
+  invokeMockTool,
+  prepareTestRun,
+  prepareTriggering,
+  submitTestRun,
+  submitTriggering,
+  validateSchema,
+} from "./evaluations";
+import { EMPTY_SKILL } from "./skill";
+import { MemoryWorkspaceStore } from "./workspace/memory-store";
+import { createWorkspaceService } from "./workspace/service";
+
+async function bundle() {
+  const created = await createWorkspaceService(
+    new MemoryWorkspaceStore(),
+  ).create({ skillMd: EMPTY_SKILL });
+  if (!created.ok) throw new Error(created.error.message);
+  return created.value;
+}
+
+describe("evaluation protocols", () => {
+  it("pins stable triggering case identity and grades one observation", async () => {
+    const workspace = await bundle();
+    const first = await prepareTriggering(workspace);
+    const second = await prepareTriggering(workspace);
+    expect((first.data as any).cases.map((item: any) => item.id)).toEqual(
+      (second.data as any).cases.map((item: any) => item.id),
+    );
+    const testCase = (first.data as any).cases[0];
+    const submitted = submitTriggering(first, {
+      caseId: testCase.id,
+      selectedChoiceId: "candidate",
+      rationale: "Description matches.",
+    });
+    expect(
+      submitted.ok && (submitted.value.data as any).observations[0],
+    ).toMatchObject({ passed: true, suppliedBy: "visiting browser agent" });
+  });
+
+  it("derives fixtures and checks tool/final JSON contracts", async () => {
+    const schema = {
+      type: "object",
+      properties: { items: { type: "array", items: { type: "string" } } },
+      required: ["items"],
+    } as const;
+    expect(exampleFromSchema(schema)).toEqual({ items: ["example"] });
+    expect(validateSchema({}, schema)).toContain("$.items is required.");
+    const run = prepareTestRun(
+      await bundle(),
+      {
+        name: "read_items",
+        description: "Read items",
+        inputSchema: {
+          type: "object",
+          required: ["limit"],
+          properties: { limit: { type: "integer" } },
+        },
+        outputSchema: schema,
+      },
+      schema,
+    );
+    const invoked = invokeMockTool(run, { limit: 2 });
+    expect(invoked.ok).toBe(true);
+    if (!invoked.ok) return;
+    const submitted = submitTestRun(invoked.value.record, { items: ["done"] });
+    expect(
+      submitted.ok &&
+        (submitted.value.data as any).checks.every(
+          (check: any) => check.passed,
+        ),
+    ).toBe(true);
+  });
+});
