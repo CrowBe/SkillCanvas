@@ -202,6 +202,7 @@ describe("WebMCP envelope guarantees", () => {
       submission: {},
     });
     expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("internal_error");
     expect(envelope.error.message).toContain("store exploded");
   });
 });

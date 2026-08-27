@@ -106,7 +106,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
           revision: null,
           contentHash: null,
           error: {
-            code: "invalid_submission",
+            code: "internal_error",
             message:
               error instanceof Error ? error.message : "Tool call failed.",
           },

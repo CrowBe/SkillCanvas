@@ -381,7 +381,7 @@ export function validateSchema(
   schema: JsonSchema,
   path = "$",
 ): readonly string[] {
-  if (!isSchemaNode(schema)) return [];
+  if (!isSchemaNode(schema)) return [`${path} has an invalid schema.`];
   const issues: string[] = [];
   const type = schema.type;
   const validType =

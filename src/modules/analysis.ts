@@ -71,6 +71,24 @@ function spanOf(raw: string, needle: string): SourceSpan | undefined {
   return start < 0 ? undefined : { start, end: start + needle.length };
 }
 
+function frontmatterKeySpan(raw: string, key: string): SourceSpan | undefined {
+  const match = raw.match(
+    new RegExp(`^${key}:.*(?:\\n(?:[ \\t]+\\S.*|[ \\t]*))*`, "m"),
+  );
+  if (match?.index === undefined) return undefined;
+  return {
+    start: match.index,
+    end: match.index + match[0].replace(/\s+$/, "").length,
+  };
+}
+
+function descriptionSpan(
+  raw: string,
+  description: string,
+): SourceSpan | undefined {
+  return spanOf(raw, description) ?? frontmatterKeySpan(raw, "description");
+}
+
 export function analyzeLint(
   raw: string,
   referencePaths: readonly string[] = [],
@@ -97,7 +115,7 @@ export function analyzeLint(
         rule: "frontmatter.description-short",
         severity: "warn",
         message: "Description is too short to support reliable triggering.",
-        sourceSpan: spanOf(raw, description),
+        sourceSpan: descriptionSpan(raw, description),
       });
     if (
       !/\b(?:use|when|create|review|analy[sz]e|build|debug|edit|generate|test)\b/i.test(
@@ -109,7 +127,7 @@ export function analyzeLint(
         severity: "info",
         message:
           "Description should say what request should trigger the Skill.",
-        sourceSpan: spanOf(raw, description),
+        sourceSpan: descriptionSpan(raw, description),
       });
     for (const key of Object.keys(extra).sort())
       findings.push({
@@ -193,13 +211,25 @@ export function analyzeStructure(raw: string): StructureArtifact {
     title: string;
     sourceSpan: SourceSpan;
   }> = [];
-  for (const match of raw.matchAll(/^(#{1,6})\s+(.+)$/gm)) {
-    if (match.index === undefined || !match[1] || !match[2]) continue;
-    sections.push({
-      level: match[1].length,
-      title: match[2].trim(),
-      sourceSpan: { start: match.index, end: match.index + match[0].length },
-    });
+  let offset = 0;
+  let fence: string | null = null;
+  for (const line of raw.split("\n")) {
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fenceMatch?.[1]) {
+      const marker = fenceMatch[1];
+      if (fence === null) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length)
+        fence = null;
+    } else if (fence === null) {
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading?.[1] && heading[2])
+        sections.push({
+          level: heading[1].length,
+          title: heading[2].trim(),
+          sourceSpan: { start: offset, end: offset + line.length },
+        });
+    }
+    offset += line.length + 1;
   }
   return {
     kind: "structure",

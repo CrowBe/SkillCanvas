@@ -199,3 +199,33 @@ describe("WorkspaceService schema and submission guards", () => {
     if (!result.ok) expect(result.error.code).toBe("invalid_submission");
   });
 });
+
+describe("snapshot import schema guards", () => {
+  it("rejects an imported test-run evaluation whose contract schema is malformed", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const prepared = await service.prepareEvaluation(id, "test-run", {
+      contract: {
+        name: "read_items",
+        description: "Read items",
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        mockOutput: {},
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const exported = await service.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const testRun = snapshot.evaluations.find(
+      (item: any) => item.kind === "test-run",
+    );
+    testRun.data.contract.inputSchema = null;
+    const importer = createWorkspaceService(new MemoryWorkspaceStore());
+    const imported = await importer.importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+});
