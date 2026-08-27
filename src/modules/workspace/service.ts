@@ -501,6 +501,33 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
     const validated = validateInput(skillMd, references);
     if (!validated.ok) return validated;
   }
+  for (const evaluation of snapshot.evaluations) {
+    if (!evaluation || typeof evaluation !== "object")
+      return err(
+        "invalid_snapshot",
+        "Snapshot contains an invalid evaluation record.",
+      );
+    if (evaluation.kind !== "test-run") continue;
+    const contract = (evaluation.data as { contract?: unknown } | undefined)
+      ?.contract;
+    const contractIssue = toolContractError(contract);
+    if (contractIssue)
+      return err(
+        "invalid_snapshot",
+        `Evaluation ${evaluation.id} has an invalid Tool contract: ${contractIssue}`,
+      );
+    const responseSchema = (
+      evaluation.data as { responseSchema?: unknown } | undefined
+    )?.responseSchema;
+    if (responseSchema !== undefined) {
+      const schemaIssue = schemaSubsetError(responseSchema, "responseSchema");
+      if (schemaIssue)
+        return err(
+          "invalid_snapshot",
+          `Evaluation ${evaluation.id} has an invalid response schema: ${schemaIssue}`,
+        );
+    }
+  }
   return ok(snapshot as WorkspaceSnapshot);
 }
 
