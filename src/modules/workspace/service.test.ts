@@ -229,3 +229,79 @@ describe("snapshot import schema guards", () => {
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });
 });
+
+describe("snapshot import evaluation data guards", () => {
+  async function snapshotWith(
+    mutate: (snapshot: any) => void,
+  ): Promise<string> {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const triggering = await service.prepareEvaluation(id, "triggering");
+    if (!triggering.ok) throw new Error(triggering.error.message);
+    const testRun = await service.prepareEvaluation(id, "test-run", {
+      contract: {
+        name: "read_items",
+        description: "Read items",
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        mockOutput: {},
+      },
+    });
+    if (!testRun.ok) throw new Error(testRun.error.message);
+    const exported = await service.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    mutate(snapshot);
+    return JSON.stringify(snapshot);
+  }
+
+  it("imports a well-formed snapshot and still grades a triggering submission", async () => {
+    const json = await snapshotWith(() => {});
+    const importer = createWorkspaceService(new MemoryWorkspaceStore());
+    const imported = await importer.importSnapshot(json);
+    expect(imported.ok).toBe(true);
+    if (!imported.ok) return;
+    const record = imported.value.evaluations.find(
+      (item) => item.kind === "triggering",
+    )!;
+    const caseId = (record.data as any).cases[0].id;
+    const graded = await importer.submitEvaluation(
+      imported.value.workspace.id,
+      record.id,
+      {
+        caseId,
+        selectedChoiceId: "candidate",
+        rationale: "Description matches.",
+      },
+    );
+    expect(graded.ok).toBe(true);
+  });
+
+  it("rejects a test-run evaluation whose transcript is missing", async () => {
+    const json = await snapshotWith((snapshot) => {
+      const testRun = snapshot.evaluations.find(
+        (item: any) => item.kind === "test-run",
+      );
+      delete testRun.data.transcript;
+    });
+    const importer = createWorkspaceService(new MemoryWorkspaceStore());
+    const imported = await importer.importSnapshot(json);
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
+  it("rejects a triggering evaluation whose observations are missing", async () => {
+    const json = await snapshotWith((snapshot) => {
+      const triggering = snapshot.evaluations.find(
+        (item: any) => item.kind === "triggering",
+      );
+      delete triggering.data.observations;
+    });
+    const importer = createWorkspaceService(new MemoryWorkspaceStore());
+    const imported = await importer.importSnapshot(json);
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+});

@@ -507,26 +507,12 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         "invalid_snapshot",
         "Snapshot contains an invalid evaluation record.",
       );
-    if (evaluation.kind !== "test-run") continue;
-    const contract = (evaluation.data as { contract?: unknown } | undefined)
-      ?.contract;
-    const contractIssue = toolContractError(contract);
-    if (contractIssue)
+    const dataIssue = evaluationDataError(evaluation.kind, evaluation.data);
+    if (dataIssue)
       return err(
         "invalid_snapshot",
-        `Evaluation ${evaluation.id} has an invalid Tool contract: ${contractIssue}`,
+        `Evaluation ${evaluation.id} has invalid data: ${dataIssue}`,
       );
-    const responseSchema = (
-      evaluation.data as { responseSchema?: unknown } | undefined
-    )?.responseSchema;
-    if (responseSchema !== undefined) {
-      const schemaIssue = schemaSubsetError(responseSchema, "responseSchema");
-      if (schemaIssue)
-        return err(
-          "invalid_snapshot",
-          `Evaluation ${evaluation.id} has an invalid response schema: ${schemaIssue}`,
-        );
-    }
   }
   return ok(snapshot as WorkspaceSnapshot);
 }
@@ -553,4 +539,62 @@ function toolContractError(contract: unknown): string | null {
     schemaSubsetError(candidate.inputSchema, "inputSchema") ??
     schemaSubsetError(candidate.outputSchema, "outputSchema")
   );
+}
+
+function evaluationDataError(kind: unknown, data: unknown): string | null {
+  if (!isSchemaObject(data)) return "evaluation data must be an object.";
+  const record = data as Record<string, unknown>;
+  if (kind === "triggering") {
+    if (!Array.isArray(record.cases) || !Array.isArray(record.observations))
+      return "a triggering evaluation requires cases and observations arrays.";
+    for (const item of record.cases) {
+      if (
+        !isSchemaObject(item) ||
+        typeof (item as Record<string, unknown>).id !== "string" ||
+        !Array.isArray((item as Record<string, unknown>).choices)
+      )
+        return "a triggering case requires an id and a choices array.";
+      for (const choice of (item as { choices: unknown[] }).choices)
+        if (
+          !isSchemaObject(choice) ||
+          typeof (choice as Record<string, unknown>).id !== "string"
+        )
+          return "a triggering choice requires an id.";
+    }
+    for (const observation of record.observations)
+      if (
+        !isSchemaObject(observation) ||
+        typeof (observation as Record<string, unknown>).caseId !== "string"
+      )
+        return "a triggering observation requires a caseId.";
+    return null;
+  }
+  if (kind === "test-run") {
+    const contractIssue = toolContractError(record.contract);
+    if (contractIssue) return contractIssue;
+    if (record.responseSchema !== undefined) {
+      const schemaIssue = schemaSubsetError(
+        record.responseSchema,
+        "responseSchema",
+      );
+      if (schemaIssue) return schemaIssue;
+    }
+    if (
+      !isSchemaObject(record.scenario) ||
+      typeof (record.scenario as Record<string, unknown>).prompt !== "string"
+    )
+      return "a test run requires a scenario with a prompt.";
+    if (!Array.isArray(record.transcript))
+      return "a test run requires a transcript array.";
+    for (const step of record.transcript)
+      if (
+        !isSchemaObject(step) ||
+        typeof (step as Record<string, unknown>).kind !== "string"
+      )
+        return "a transcript step requires a kind.";
+    if (record.checks !== undefined && !Array.isArray(record.checks))
+      return "test-run checks must be an array.";
+    return null;
+  }
+  return null;
 }
