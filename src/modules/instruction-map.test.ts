@@ -79,3 +79,29 @@ describe("instruction-load vector", () => {
     expect(validateInstructionMap(map, raw, 1).ok).toBe(false);
   });
 });
+
+describe("instruction map validation", () => {
+  it("rejects a scope hierarchy that contains a cycle", () => {
+    const cyclic: InstructionMap = {
+      ...base,
+      scopes: [
+        { id: "a", parentId: "b", label: "A" },
+        { id: "b", parentId: "a", label: "B" },
+      ],
+      requirements: [
+        {
+          id: "r",
+          sourceSpan: { start: 0, end: 3 },
+          statement: "one",
+          kind: "action",
+          scopeId: "a",
+          dependencies: [],
+          verifiability: "deterministic",
+        },
+      ],
+    };
+    const result = validateInstructionMap(cyclic, raw, 1);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error.message).toContain("cycle");
+  });
+});

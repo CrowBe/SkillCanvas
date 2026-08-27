@@ -73,3 +73,29 @@ describe("evaluation protocols", () => {
     ).toBe(true);
   });
 });
+
+describe("triggering candidate derivation", () => {
+  it("reads block-scalar frontmatter descriptions", async () => {
+    const skillMd = [
+      "---",
+      "name: block-scalar-skill",
+      "description: >-",
+      "  Use when the user wants quarterly revenue reconciled across ledgers.",
+      "---",
+      "",
+      "# Block scalar skill",
+      "",
+      "Body.",
+    ].join("\n");
+    const created = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).create({ skillMd });
+    if (!created.ok) throw new Error(created.error.message);
+    const run = await prepareTriggering(created.value);
+    const candidate = (run.data as any).cases[0].choices.find(
+      (choice: any) => choice.candidate,
+    );
+    expect(candidate.name).toBe("block-scalar-skill");
+    expect(candidate.description).toContain("quarterly revenue");
+  });
+});

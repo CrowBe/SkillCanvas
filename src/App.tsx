@@ -133,6 +133,7 @@ export function App() {
       set: (id: string) =>
         sessionStorage.setItem("skill-canvas:open-workspace", id),
     };
+    let cancelled = false;
     registerWebMcpTools(document.modelContext, {
       service,
       appearance,
@@ -141,14 +142,23 @@ export function App() {
       download,
     })
       .then((registration) => {
+        if (cancelled) {
+          registration.dispose();
+          return;
+        }
         registrationRef.current = registration;
         setWebMcp(registration.available ? "available" : "fallback");
       })
       .catch((error) => {
+        if (cancelled) return;
         setWebMcp("fallback");
         setStatus(`WebMCP registration failed: ${message(error)}`);
       });
-    return () => registrationRef.current?.dispose();
+    return () => {
+      cancelled = true;
+      registrationRef.current?.dispose();
+      registrationRef.current = null;
+    };
   }, []);
 
   function loadBundle(next: WorkspaceBundle) {
