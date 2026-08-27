@@ -143,3 +143,35 @@ describe("WebMCP adapter", () => {
     expect(mock.signal?.aborted).toBe(true);
   });
 });
+
+describe("WebMCP registration failures", () => {
+  it("aborts already-registered tools when one registration rejects", async () => {
+    const live = new Map<string, number>();
+    let calls = 0;
+    const context = {
+      async registerTool(tool: WebMcpTool, options?: { signal?: AbortSignal }) {
+        calls += 1;
+        if (calls === 2) throw new Error("registration refused");
+        live.set(tool.name, (live.get(tool.name) ?? 0) + 1);
+        options?.signal?.addEventListener("abort", () =>
+          live.set(tool.name, (live.get(tool.name) ?? 0) - 1),
+        );
+        return undefined;
+      },
+    };
+    let current: string | null = null;
+    await expect(
+      registerWebMcpTools(context, {
+        service: createWorkspaceService(new MemoryWorkspaceStore()),
+        appearance: appearance(),
+        selection: {
+          get: () => current,
+          set: (id) => {
+            current = id;
+          },
+        },
+      }),
+    ).rejects.toThrow("registration refused");
+    expect([...live.values()].every((count) => count === 0)).toBe(true);
+  });
+});

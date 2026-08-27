@@ -37,11 +37,87 @@ export type InstructionLoadVector = {
   readonly deterministicallyVerifiableFraction: number;
 };
 
+const INSTRUCTION_KINDS: readonly string[] = [
+  "action",
+  "constraint",
+  "condition",
+  "prohibition",
+  "preference",
+];
+const VERIFIABILITIES: readonly string[] = [
+  "deterministic",
+  "semantic-judgment",
+  "unverified",
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function shapeError(message: string): Result<InstructionMap> {
+  return err("invalid_instruction_map", message);
+}
+
+function checkShape(input: unknown): Result<InstructionMap> {
+  if (!isRecord(input)) return shapeError("Instruction map must be an object.");
+  if (typeof input.revision !== "number")
+    return shapeError("Instruction map requires a numeric revision.");
+  if (input.status !== "proposed" && input.status !== "accepted")
+    return shapeError(
+      'Instruction map status must be "proposed" or "accepted".',
+    );
+  if (!Array.isArray(input.scopes) || !Array.isArray(input.requirements))
+    return shapeError(
+      "Instruction map requires scopes and requirements arrays.",
+    );
+  for (const scope of input.scopes) {
+    if (!isRecord(scope) || typeof scope.id !== "string" || scope.id === "")
+      return shapeError("Every scope requires a string id.");
+    if (typeof scope.label !== "string")
+      return shapeError(`Scope ${scope.id} requires a string label.`);
+    if (scope.parentId !== undefined && typeof scope.parentId !== "string")
+      return shapeError(`Scope ${scope.id} has an invalid parentId.`);
+  }
+  for (const requirement of input.requirements) {
+    if (
+      !isRecord(requirement) ||
+      typeof requirement.id !== "string" ||
+      requirement.id === ""
+    )
+      return shapeError("Every requirement requires a string id.");
+    const label = requirement.id;
+    if (typeof requirement.statement !== "string")
+      return shapeError(`Requirement ${label} requires a statement.`);
+    if (typeof requirement.scopeId !== "string")
+      return shapeError(`Requirement ${label} requires a scopeId.`);
+    if (!INSTRUCTION_KINDS.includes(requirement.kind as string))
+      return shapeError(`Requirement ${label} has an unknown kind.`);
+    if (!VERIFIABILITIES.includes(requirement.verifiability as string))
+      return shapeError(`Requirement ${label} has an unknown verifiability.`);
+    if (
+      !Array.isArray(requirement.dependencies) ||
+      requirement.dependencies.some((item) => typeof item !== "string")
+    )
+      return shapeError(`Requirement ${label} has invalid dependencies.`);
+    const span = requirement.sourceSpan;
+    if (
+      !isRecord(span) ||
+      typeof span.start !== "number" ||
+      typeof span.end !== "number"
+    )
+      return shapeError(`Requirement ${label} requires a numeric source span.`);
+  }
+  return ok(input as unknown as InstructionMap);
+}
+
 export function validateInstructionMap(
-  map: InstructionMap,
+  input: unknown,
   raw: string,
   revision: number,
 ): Result<InstructionMap> {
+  const shape = checkShape(input);
+  if (!shape.ok) return shape;
+  const map = shape.value;
   if (map.revision !== revision)
     return err(
       "invalid_instruction_map",

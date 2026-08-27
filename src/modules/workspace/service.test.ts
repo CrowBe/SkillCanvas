@@ -99,3 +99,52 @@ describe("WorkspaceService", () => {
     if (!malformed.ok) expect(malformed.error.code).toBe("invalid_snapshot");
   });
 });
+
+describe("WorkspaceService input validation", () => {
+  it("returns a typed error for a malformed instruction map instead of throwing", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const missingArrays = await service.submitInstructionMap(
+      id,
+      {
+        revision: 1,
+        status: "proposed",
+        suppliedBy: "visiting-agent proposal",
+      },
+      true,
+    );
+    expect(missingArrays.ok).toBe(false);
+    if (!missingArrays.ok)
+      expect(missingArrays.error.code).toBe("invalid_instruction_map");
+    const badRequirement = await service.submitInstructionMap(
+      id,
+      {
+        revision: 1,
+        status: "proposed",
+        suppliedBy: "visiting-agent proposal",
+        scopes: [{ id: "root", label: "Root" }],
+        requirements: [{ id: "r", statement: "one" }],
+      },
+      true,
+    );
+    expect(badRequirement.ok).toBe(false);
+    expect((await service.submitInstructionMap(id, "not-a-map", true)).ok).toBe(
+      false,
+    );
+  });
+
+  it("returns a typed error for a malformed Tool contract instead of throwing", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const result = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      { contract: { name: "x" } as never },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("invalid_submission");
+  });
+});
