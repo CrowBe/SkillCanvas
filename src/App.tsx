@@ -21,10 +21,12 @@ import { IndexedDbWorkspaceStore } from "./modules/workspace/indexeddb-store";
 import {
   createWorkspaceService,
   type CompareArtifact,
+  type WorkspaceService,
 } from "./modules/workspace/service";
 import type {
   EvaluationRecord,
   WorkspaceBundle,
+  WorkspaceRecord,
 } from "./modules/workspace/types";
 import { registerWebMcpTools } from "./modules/webmcp";
 
@@ -86,8 +88,13 @@ const RESPONSE_SCHEMA = {
   required: ["themes"],
 } as const;
 
-export function App() {
+export function App({
+  workspaceService = service,
+}: {
+  workspaceService?: WorkspaceService;
+} = {}) {
   const [bundle, setBundle] = useState<WorkspaceBundle | null>(null);
+  const [workspaces, setWorkspaces] = useState<readonly WorkspaceRecord[]>([]);
   const [source, setSource] = useState("");
   const [view, setView] = useState<"rendered" | "source">(
     (localStorage.getItem("skill-canvas:view") as any) || "rendered",
@@ -123,19 +130,28 @@ export function App() {
 
   useEffect(() => appearance.subscribe(setAppearanceState), []);
   useEffect(() => {
+    let cancelled = false;
     const currentId = sessionStorage.getItem("skill-canvas:open-workspace");
+    workspaceService
+      .list()
+      .then((records) => {
+        if (!cancelled) setWorkspaces(records);
+      })
+      .catch((error) => {
+        if (!cancelled)
+          setStatus(`Workspace recovery failed: ${message(error)}`);
+      });
     if (currentId)
-      service.open(currentId).then((result) => {
-        if (result.ok) loadBundle(result.value);
+      workspaceService.open(currentId).then((result) => {
+        if (!cancelled && result.ok) loadBundle(result.value);
       });
     const selection = {
       get: () => sessionStorage.getItem("skill-canvas:open-workspace"),
       set: (id: string) =>
         sessionStorage.setItem("skill-canvas:open-workspace", id),
     };
-    let cancelled = false;
     registerWebMcpTools(document.modelContext, {
-      service,
+      service: workspaceService,
       appearance,
       selection,
       onWorkspaceChange: loadBundle,
@@ -164,6 +180,10 @@ export function App() {
   function loadBundle(next: WorkspaceBundle) {
     sessionStorage.setItem("skill-canvas:open-workspace", next.workspace.id);
     setBundle(next);
+    setWorkspaces((current) => [
+      next.workspace,
+      ...current.filter((workspace) => workspace.id !== next.workspace.id),
+    ]);
     setSource(next.skillMd);
     setLint(
       (next.artifacts.find((item) => item.kind === "lint")?.data as
@@ -191,7 +211,7 @@ export function App() {
     );
   }
   async function create(skillMd = SAMPLE_SKILL) {
-    const result = await service.create({
+    const result = await workspaceService.create({
       name: "Skill Canvas demo",
       skillMd,
       actor: "human",
@@ -201,7 +221,7 @@ export function App() {
   }
   async function save() {
     if (!bundle) return;
-    const result = await service.update({
+    const result = await workspaceService.update({
       workspaceId: bundle.workspace.id,
       baseRevision: bundle.revision.revision,
       skillMd: source,
@@ -214,7 +234,7 @@ export function App() {
   }
   async function analyze() {
     if (!bundle) return;
-    const result = await service.analyze(bundle.workspace.id, [
+    const result = await workspaceService.analyze(bundle.workspace.id, [
       "lint",
       "structure",
     ]);
@@ -232,7 +252,7 @@ export function App() {
       setStatus("Create another revision before comparing.");
       return;
     }
-    const result = await service.compare(
+    const result = await workspaceService.compare(
       bundle.workspace.id,
       bundle.revision.parentRevision,
       bundle.revision.revision,
@@ -244,7 +264,7 @@ export function App() {
   }
   async function prepareTriggering() {
     if (!bundle) return;
-    const result = await service.prepareEvaluation(
+    const result = await workspaceService.prepareEvaluation(
       bundle.workspace.id,
       "triggering",
     );
@@ -260,7 +280,7 @@ export function App() {
     const data = evaluation.data as TriggeringRunData;
     const current = data.cases[data.observations.length];
     if (!current) return;
-    const result = await service.submitEvaluation(
+    const result = await workspaceService.submitEvaluation(
       bundle.workspace.id,
       evaluation.id,
       { caseId: current.id, selectedChoiceId: selectedChoice, rationale },
@@ -278,7 +298,7 @@ export function App() {
   }
   async function prepareMockedRun() {
     if (!bundle) return;
-    const result = await service.prepareEvaluation(
+    const result = await workspaceService.prepareEvaluation(
       bundle.workspace.id,
       "test-run",
       { contract: SAMPLE_CONTRACT, responseSchema: RESPONSE_SCHEMA },
@@ -303,7 +323,7 @@ export function App() {
   }
   async function invokeManualMock() {
     if (!bundle || !evaluation) return;
-    const result = await service.invokeMock(
+    const result = await workspaceService.invokeMock(
       bundle.workspace.id,
       evaluation.id,
       { limit: 2 },
@@ -322,7 +342,7 @@ export function App() {
       setStatus("Final output must be valid JSON.");
       return;
     }
-    const result = await service.submitEvaluation(
+    const result = await workspaceService.submitEvaluation(
       bundle.workspace.id,
       evaluation.id,
       { finalOutput: parsed },
@@ -341,7 +361,7 @@ export function App() {
       setStatus("Instruction map must be valid JSON.");
       return;
     }
-    const result = await service.submitInstructionMap(
+    const result = await workspaceService.submitInstructionMap(
       bundle.workspace.id,
       map,
       accept,
@@ -357,7 +377,7 @@ export function App() {
   }
   async function exportSkill() {
     if (!bundle) return;
-    const result = await service.exportSkill(bundle.workspace.id);
+    const result = await workspaceService.exportSkill(bundle.workspace.id);
     if (result.ok) {
       download(`${bundle.workspace.name}.zip`, result.value, "application/zip");
       setStatus("Standard-native Skill exported without workbench metadata.");
@@ -365,7 +385,7 @@ export function App() {
   }
   async function exportSnapshot() {
     if (!bundle) return;
-    const result = await service.exportSnapshot(bundle.workspace.id);
+    const result = await workspaceService.exportSnapshot(bundle.workspace.id);
     if (result.ok) {
       download(
         `${bundle.workspace.name}.workbench.json`,
@@ -442,6 +462,12 @@ export function App() {
       <main className="workspace">
         {!bundle ? (
           <Welcome
+            workspaces={workspaces}
+            onOpen={async (workspaceId) => {
+              const result = await workspaceService.open(workspaceId);
+              if (result.ok) loadBundle(result.value);
+              else setStatus(result.error.message);
+            }}
             onCreate={() => create()}
             onEmpty={() =>
               create(
@@ -609,10 +635,14 @@ export function App() {
 }
 
 function Welcome({
+  workspaces,
+  onOpen,
   onCreate,
   onEmpty,
   onFile,
 }: {
+  workspaces: readonly WorkspaceRecord[];
+  onOpen(workspaceId: string): void;
   onCreate(): void;
   onEmpty(): void;
   onFile(file: File): void;
@@ -648,6 +678,17 @@ function Welcome({
             />
           </label>
         </div>
+        {workspaces.length > 0 && (
+          <div className="recent-workspaces">
+            <p className="eyebrow">Saved in this browser</p>
+            {workspaces.map((workspace) => (
+              <button key={workspace.id} onClick={() => onOpen(workspace.id)}>
+                <strong>{workspace.name}</strong>
+                <span>Revision {workspace.currentRevision}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="thesis-stack">
         <div>

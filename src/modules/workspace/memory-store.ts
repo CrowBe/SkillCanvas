@@ -269,14 +269,10 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       )
     )
       return domainError("invalid_snapshot", "Revision lineage is invalid.");
-    if (
-      !revisions.some(
-        (revision) => revision.revision === snapshot.workspace.currentRevision,
-      )
-    )
+    if (snapshot.workspace.currentRevision !== revisions.at(-1)!.revision)
       return domainError(
         "invalid_snapshot",
-        "The current workspace revision is missing from the snapshot.",
+        "The current workspace revision must be the lineage tip.",
       );
     if (
       revisions.some(

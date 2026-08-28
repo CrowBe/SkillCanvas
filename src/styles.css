@@ -781,6 +781,32 @@ button.primary {
   flex-wrap: wrap;
   margin-top: 26px;
 }
+.recent-workspaces {
+  display: grid;
+  gap: 8px;
+  margin-top: 32px;
+  max-width: 690px;
+}
+.recent-workspaces > p {
+  margin: 0 0 2px;
+}
+.recent-workspaces button {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  text-align: left;
+}
+.recent-workspaces strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-workspaces span {
+  flex: 0 0 auto;
+  color: var(--on-surface-variant);
+  font: 11px var(--type-mono);
+}
 .file-button input {
   display: none;
 }

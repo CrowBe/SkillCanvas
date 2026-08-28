@@ -27,6 +27,28 @@ describe("MemoryWorkspaceStore snapshot admission", () => {
     expect(await target.listWorkspaces()).toEqual([]);
   });
 
+  it("requires the current revision to be the lineage tip", async () => {
+    const source = new MemoryWorkspaceStore();
+    const created = await source.createWorkspace({
+      name: "source",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    const updated = await source.appendRevision({
+      workspaceId: created.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nMore detail.`,
+      actor: "human",
+    });
+    if ("code" in updated) throw new Error(updated.message);
+    const snapshot = await snapshotFrom(source, created.workspace.id);
+    (snapshot.workspace as { currentRevision: number }).currentRevision = 1;
+    const target = new MemoryWorkspaceStore();
+    const imported = await target.importSnapshot(snapshot);
+    expect("code" in imported && imported.code).toBe("invalid_snapshot");
+    expect(await target.listWorkspaces()).toEqual([]);
+  });
+
   it("rejects foreign ownership and existing child-record id collisions", async () => {
     const target = new MemoryWorkspaceStore();
     const existing = await target.createWorkspace({

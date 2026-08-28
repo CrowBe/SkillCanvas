@@ -72,6 +72,15 @@ describe("evaluation protocols", () => {
         ),
     ).toBe(true);
   });
+
+  it("rejects values outside a schema enum", () => {
+    expect(
+      validateSchema("delete", { type: "string", enum: ["create"] }),
+    ).toEqual(["$ must be one of the allowed enum values."]);
+    expect(
+      validateSchema({ action: "create" }, { enum: [{ action: "create" }] }),
+    ).toEqual([]);
+  });
 });
 
 describe("triggering candidate derivation", () => {

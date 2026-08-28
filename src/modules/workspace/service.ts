@@ -133,8 +133,10 @@ export function createWorkspaceService(
     fromStore(await store.openWorkspace(workspaceId, revision));
   return {
     async create(input = {}) {
-      const skillMd = input.skillMd ?? EMPTY_SKILL;
-      const valid = validateInput(skillMd, input.referenceFiles ?? []);
+      const skillMd = input.skillMd === undefined ? EMPTY_SKILL : input.skillMd;
+      const referenceFiles =
+        input.referenceFiles === undefined ? [] : input.referenceFiles;
+      const valid = validateInput(skillMd, referenceFiles);
       if (!valid.ok) return valid;
       return ok(
         await store.createWorkspace({
@@ -149,11 +151,15 @@ export function createWorkspaceService(
     list: () => store.listWorkspaces(),
     open,
     async update(input) {
-      const valid = validateInput(input.skillMd, input.referenceFiles ?? []);
+      const referenceFiles =
+        input.referenceFiles === undefined ? [] : input.referenceFiles;
+      const valid = validateInput(input.skillMd, referenceFiles);
       if (!valid.ok) return valid;
       const result = await store.appendRevision({
         ...input,
-        ...(input.referenceFiles ? { referenceFiles: valid.value } : {}),
+        ...(input.referenceFiles !== undefined
+          ? { referenceFiles: valid.value }
+          : {}),
       });
       return fromStore(result);
     },
@@ -425,7 +431,10 @@ function summary(lint: LintArtifact) {
 function lineDiff(before: string, after: string) {
   const left = before.split("\n");
   const right = after.split("\n");
-  const common = longestCommonSubsequence(left, right);
+  const common = longestCommonSubsequence(left, right, {
+    remaining: 8_000_000,
+  });
+  if (common === null) return boundedLineChanges(left, right);
   const changedLines = new Set<number>();
   let additions = 0;
   let deletions = 0;
@@ -454,17 +463,24 @@ function lineDiff(before: string, after: string) {
 function longestCommonSubsequence(
   left: readonly string[],
   right: readonly string[],
+  budget: { remaining: number },
   leftOffset = 0,
   rightOffset = 0,
-): readonly (readonly [number, number])[] {
+): readonly (readonly [number, number])[] | null {
   if (left.length === 0 || right.length === 0) return [];
   if (left.length === 1) {
     const match = right.indexOf(left[0]!);
     return match < 0 ? [] : [[leftOffset, rightOffset + match]];
   }
   const middle = Math.floor(left.length / 2);
-  const prefix = lcsLengths(left.slice(0, middle), right);
-  const suffix = lcsLengths(left.slice(middle).reverse(), [...right].reverse());
+  const prefix = lcsLengths(left.slice(0, middle), right, budget);
+  if (prefix === null) return null;
+  const suffix = lcsLengths(
+    left.slice(middle).reverse(),
+    [...right].reverse(),
+    budget,
+  );
+  if (suffix === null) return null;
   let split = 0;
   for (let index = 1; index <= right.length; index += 1)
     if (
@@ -472,26 +488,32 @@ function longestCommonSubsequence(
       prefix[split]! + suffix[right.length - split]!
     )
       split = index;
-  return [
-    ...longestCommonSubsequence(
-      left.slice(0, middle),
-      right.slice(0, split),
-      leftOffset,
-      rightOffset,
-    ),
-    ...longestCommonSubsequence(
-      left.slice(middle),
-      right.slice(split),
-      leftOffset + middle,
-      rightOffset + split,
-    ),
-  ];
+  const leftMatches = longestCommonSubsequence(
+    left.slice(0, middle),
+    right.slice(0, split),
+    budget,
+    leftOffset,
+    rightOffset,
+  );
+  if (leftMatches === null) return null;
+  const rightMatches = longestCommonSubsequence(
+    left.slice(middle),
+    right.slice(split),
+    budget,
+    leftOffset + middle,
+    rightOffset + split,
+  );
+  return rightMatches === null ? null : [...leftMatches, ...rightMatches];
 }
 
 function lcsLengths(
   left: readonly string[],
   right: readonly string[],
-): number[] {
+  budget: { remaining: number },
+): number[] | null {
+  const comparisons = left.length * right.length;
+  if (comparisons > budget.remaining) return null;
+  budget.remaining -= comparisons;
   let previous = Array<number>(right.length + 1).fill(0);
   for (const line of left) {
     const current = Array<number>(right.length + 1).fill(0);
@@ -503,6 +525,32 @@ function lcsLengths(
     previous = current;
   }
   return previous;
+}
+
+function boundedLineChanges(left: readonly string[], right: readonly string[]) {
+  let prefix = 0;
+  while (
+    prefix < left.length &&
+    prefix < right.length &&
+    left[prefix] === right[prefix]
+  )
+    prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < left.length - prefix &&
+    suffix < right.length - prefix &&
+    left[left.length - suffix - 1] === right[right.length - suffix - 1]
+  )
+    suffix += 1;
+  const deletions = left.length - prefix - suffix;
+  const additions = right.length - prefix - suffix;
+  const changedLines = Array.from(
+    { length: additions },
+    (_, index) => prefix + index + 1,
+  );
+  if (deletions > 0 && additions === 0)
+    changedLines.push(Math.min(prefix + 1, Math.max(right.length, 1)));
+  return { additions, deletions, changedLines };
 }
 function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   if (!value || typeof value !== "object")
@@ -583,10 +631,11 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
     if (!validated.ok) return validated;
   }
   for (const evaluation of snapshot.evaluations) {
-    if (!evaluation || typeof evaluation !== "object")
+    const evaluationIssue = evaluationRecordError(evaluation);
+    if (evaluationIssue)
       return err(
         "invalid_snapshot",
-        "Snapshot contains an invalid evaluation record.",
+        `Snapshot contains an invalid evaluation record: ${evaluationIssue}`,
       );
     const dataIssue = evaluationDataError(evaluation.kind, evaluation.data);
     if (dataIssue)
@@ -595,10 +644,26 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         `Evaluation ${evaluation.id} has invalid data: ${dataIssue}`,
       );
   }
+  for (const artifact of snapshot.artifacts) {
+    const issue = artifactRecordError(artifact);
+    if (issue)
+      return err(
+        "invalid_snapshot",
+        `Snapshot contains an invalid artifact record: ${issue}`,
+      );
+  }
+  for (const event of snapshot.auditEvents) {
+    const issue = auditEventError(event);
+    if (issue)
+      return err(
+        "invalid_snapshot",
+        `Snapshot contains an invalid audit event: ${issue}`,
+      );
+  }
   return ok(snapshot as WorkspaceSnapshot);
 }
 
-function isSchemaObject(value: unknown): boolean {
+function isSchemaObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -656,12 +721,33 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
       )
         return "a triggering case requires unique choice ids and exactly one candidate.";
     }
-    for (const observation of record.observations)
+    if (record.observations.length > record.cases.length)
+      return "a triggering evaluation has too many observations.";
+    for (const [index, observation] of record.observations.entries())
       if (
         !isSchemaObject(observation) ||
-        typeof (observation as Record<string, unknown>).caseId !== "string"
+        typeof observation.caseId !== "string" ||
+        typeof observation.selectedChoiceId !== "string" ||
+        typeof observation.rationale !== "string" ||
+        typeof observation.passed !== "boolean" ||
+        observation.suppliedBy !== "visiting browser agent" ||
+        typeof observation.submittedAt !== "string"
       )
-        return "a triggering observation requires a caseId.";
+        return "a triggering observation is incomplete.";
+      else {
+        const testCase = record.cases[index] as Record<string, unknown>;
+        const choices = testCase.choices as Array<Record<string, unknown>>;
+        const choice = choices.find(
+          (candidate) => candidate.id === observation.selectedChoiceId,
+        );
+        const expectedCandidate = testCase.expected === "fire";
+        if (
+          observation.caseId !== testCase.id ||
+          !choice ||
+          observation.passed !== (choice.candidate === expectedCandidate)
+        )
+          return "triggering observations must match case order and grading.";
+      }
     return null;
   }
   if (kind === "test-run") {
@@ -681,15 +767,82 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
       return "a test run requires a scenario with a prompt.";
     if (!Array.isArray(record.transcript))
       return "a test run requires a transcript array.";
-    for (const step of record.transcript)
-      if (
-        !isSchemaObject(step) ||
-        typeof (step as Record<string, unknown>).kind !== "string"
-      )
-        return "a transcript step requires a kind.";
-    if (record.checks !== undefined && !Array.isArray(record.checks))
-      return "test-run checks must be an array.";
+    for (const step of record.transcript) {
+      if (!isSchemaObject(step)) return "a transcript step must be an object.";
+      if (step.kind !== "tool-call" && step.kind !== "tool-result")
+        return "a transcript step has an unsupported kind.";
+      if (typeof step.tool !== "string" || typeof step.at !== "string")
+        return "a transcript step requires tool and timestamp fields.";
+      if (step.kind === "tool-call" ? !("input" in step) : !("output" in step))
+        return `a ${step.kind} transcript step is incomplete.`;
+    }
+    if (record.checks !== undefined) {
+      if (!Array.isArray(record.checks))
+        return "test-run checks must be an array.";
+      for (const check of record.checks)
+        if (
+          !isSchemaObject(check) ||
+          typeof check.id !== "string" ||
+          typeof check.passed !== "boolean" ||
+          typeof check.message !== "string" ||
+          check.deterministic !== true
+        )
+          return "a test-run check is incomplete.";
+    }
     return null;
   }
   return "unsupported evaluation kind.";
+}
+
+function evaluationRecordError(value: unknown): string | null {
+  if (!isSchemaObject(value)) return "record must be an object.";
+  if (
+    typeof value.id !== "string" ||
+    typeof value.workspaceId !== "string" ||
+    !Number.isInteger(value.revision) ||
+    typeof value.contentHash !== "string" ||
+    typeof value.kind !== "string" ||
+    !["prepared", "in-progress", "complete"].includes(value.status as string) ||
+    !isSchemaObject(value.versions) ||
+    typeof value.createdAt !== "string" ||
+    typeof value.updatedAt !== "string"
+  )
+    return "required metadata is missing.";
+  return null;
+}
+
+function artifactRecordError(value: unknown): string | null {
+  if (!isSchemaObject(value)) return "record must be an object.";
+  if (
+    typeof value.id !== "string" ||
+    typeof value.workspaceId !== "string" ||
+    !Number.isInteger(value.revision) ||
+    ![
+      "lint",
+      "structure",
+      "instruction-map",
+      "instruction-load",
+      "compare",
+    ].includes(value.kind as string) ||
+    typeof value.version !== "string" ||
+    typeof value.createdAt !== "string" ||
+    !("data" in value)
+  )
+    return "required metadata is missing.";
+  return null;
+}
+
+function auditEventError(value: unknown): string | null {
+  if (!isSchemaObject(value)) return "record must be an object.";
+  if (
+    typeof value.id !== "string" ||
+    typeof value.workspaceId !== "string" ||
+    typeof value.at !== "string" ||
+    !["human", "webmcp", "system"].includes(value.actor as string) ||
+    typeof value.action !== "string" ||
+    (value.revision !== undefined && !Number.isInteger(value.revision)) ||
+    (value.details !== undefined && !isSchemaObject(value.details))
+  )
+    return "required metadata is missing.";
+  return null;
 }

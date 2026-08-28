@@ -36,7 +36,7 @@ Dependencies point inward. React, `document.modelContext`, downloads, browser st
 - append audit event;
 - import/export a bounded versioned snapshot.
 
-The IndexedDB schema is versioned. Separate object stores hold workspaces, revisions, byte-exact blobs, artifacts, evaluation records, and audit events. Immutable Skill/reference content is SHA-256-addressed and deduplicated without normalizing line endings. Revision records point to a Skill blob and normalized reference pointers. The current-workspace id is the only value in `sessionStorage`; theme/view are the only small `localStorage` preferences.
+The IndexedDB schema is versioned. Separate object stores hold workspaces, revisions, byte-exact blobs, artifacts, evaluation records, and audit events. Immutable Skill/reference content is SHA-256-addressed and deduplicated without normalizing line endings. Revision records point to a Skill blob and normalized reference pointers. The welcome screen discovers saved workspaces through the store's list operation; the current-workspace id is only a session convenience in `sessionStorage`. Theme/view are the only small `localStorage` preferences.
 
 Every mutation that changes Skill content takes a base revision. A stale mutation returns:
 

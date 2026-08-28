@@ -132,6 +132,23 @@ describe("WorkspaceService input validation", () => {
     expect(badReferences.ok).toBe(false);
     if (!badReferences.ok)
       expect(badReferences.error.code).toBe("invalid_submission");
+    const nullSkill = await service.create({ skillMd: null as never });
+    expect(nullSkill.ok).toBe(false);
+    const nullReferences = await service.create({
+      skillMd: EMPTY_SKILL,
+      referenceFiles: null as never,
+    });
+    expect(nullReferences.ok).toBe(false);
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const nullUpdateReferences = await service.update({
+      workspaceId: created.value.workspace.id,
+      baseRevision: 1,
+      skillMd: EMPTY_SKILL,
+      referenceFiles: null as never,
+      actor: "human",
+    });
+    expect(nullUpdateReferences.ok).toBe(false);
   });
 
   it("returns a typed error for a malformed instruction map instead of throwing", async () => {
@@ -212,6 +229,42 @@ describe("comparison source diff", () => {
         deletions: 0,
         changedLines: [6],
       });
+  });
+
+  it("bounds comparison work for large unrelated line sets", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const header = [
+      "---",
+      "name: large-diff-skill",
+      "description: Use when a bounded line diff is needed.",
+      "---",
+      "",
+      "# Data",
+    ];
+    const before = [
+      ...header,
+      ...Array.from({ length: 3000 }, (_, index) => `before-${index}`),
+    ].join("\n");
+    const after = [
+      ...header,
+      ...Array.from({ length: 3000 }, (_, index) => `after-${index}`),
+    ].join("\n");
+    const created = await service.create({ skillMd: before });
+    if (!created.ok) throw new Error(created.error.message);
+    const updated = await service.update({
+      workspaceId: created.value.workspace.id,
+      baseRevision: 1,
+      skillMd: after,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const compared = await service.compare(created.value.workspace.id, 1, 2);
+    expect(compared.ok).toBe(true);
+    if (compared.ok) {
+      expect(compared.value.source.additions).toBe(3000);
+      expect(compared.value.source.deletions).toBe(3000);
+      expect(compared.value.source.changedLines).toHaveLength(3000);
+    }
   });
 });
 
@@ -369,6 +422,46 @@ describe("snapshot import evaluation data guards", () => {
     const imported = await importer.importSnapshot(json);
     expect(imported.ok).toBe(false);
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
+  it("rejects incomplete triggering observations and transcript steps", async () => {
+    for (const mutate of [
+      (snapshot: any) => {
+        const triggering = snapshot.evaluations.find(
+          (item: any) => item.kind === "triggering",
+        );
+        triggering.data.observations.push({
+          caseId: triggering.data.cases[0].id,
+        });
+      },
+      (snapshot: any) => {
+        const testRun = snapshot.evaluations.find(
+          (item: any) => item.kind === "test-run",
+        );
+        testRun.data.transcript.push({ kind: "tool-call" });
+      },
+    ]) {
+      const json = await snapshotWith(mutate);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(json);
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
+  it("rejects malformed artifact and audit records before store import", async () => {
+    for (const mutate of [
+      (snapshot: any) => snapshot.artifacts.push(null),
+      (snapshot: any) => snapshot.auditEvents.push(null),
+    ]) {
+      const json = await snapshotWith(mutate);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(json);
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
   });
 });
 

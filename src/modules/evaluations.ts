@@ -401,6 +401,11 @@ export function validateSchema(
     (type === "null" && value === null);
   if (!validType) return [`${path} must be ${String(type)}.`];
   if (
+    Array.isArray(schema.enum) &&
+    !schema.enum.some((candidate) => jsonValueEqual(candidate, value))
+  )
+    issues.push(`${path} must be one of the allowed enum values.`);
+  if (
     type === "object" &&
     value &&
     typeof value === "object" &&
@@ -434,6 +439,27 @@ export function validateSchema(
       ),
     );
   return issues;
+}
+
+function jsonValueEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right))
+    return (
+      left.length === right.length &&
+      left.every((item, index) => jsonValueEqual(item, right[index]))
+    );
+  if (isSchemaNode(left) && isSchemaNode(right)) {
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return (
+      leftKeys.length === rightKeys.length &&
+      leftKeys.every(
+        (key, index) =>
+          key === rightKeys[index] && jsonValueEqual(left[key], right[key]),
+      )
+    );
+  }
+  return false;
 }
 
 export function exampleFromSchema(schema: JsonSchema): unknown {
