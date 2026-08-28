@@ -16,12 +16,13 @@ export function parseSkillMd(rawInput: string): Result<SkillSource> {
     return err("size_limit", `SKILL.md exceeds ${SKILL_MAX_BYTES} bytes.`);
   if (!raw.startsWith("---\n"))
     return err("invalid_skill", "SKILL.md must begin with YAML frontmatter.");
-  const closing = raw.indexOf("\n---", 4);
-  if (closing === -1)
+  const closing = /\n---(?:\n|$)/g.exec(raw.slice(3));
+  if (!closing)
     return err("invalid_skill", "SKILL.md frontmatter is not closed.");
+  const closingStart = closing.index + 3;
   let parsed: unknown;
   try {
-    parsed = parseYaml(raw.slice(4, closing), { maxAliasCount: 0 });
+    parsed = parseYaml(raw.slice(4, closingStart), { maxAliasCount: 0 });
   } catch {
     return err("invalid_skill", "Could not parse frontmatter YAML.");
   }
@@ -38,7 +39,9 @@ export function parseSkillMd(rawInput: string): Result<SkillSource> {
     return err("size_limit", "Extra frontmatter is too large.");
   return ok({
     frontmatter: { name, description, extra },
-    body: raw.slice(closing + 4).replace(/^\n+/, ""),
+    body: raw
+      .slice(closingStart + closing[0].length)
+      .replace(/^\n+/, ""),
   });
 }
 

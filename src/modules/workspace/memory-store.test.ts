@@ -49,6 +49,30 @@ describe("MemoryWorkspaceStore snapshot admission", () => {
     expect(await target.listWorkspaces()).toEqual([]);
   });
 
+  it("requires explicit replacement and preserves invalid collisions", async () => {
+    const store = new MemoryWorkspaceStore();
+    const created = await store.createWorkspace({
+      name: "original",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    const snapshot = await snapshotFrom(store, created.workspace.id);
+    const collision = await store.importSnapshot(snapshot);
+    expect("code" in collision && collision.code).toBe("invalid_snapshot");
+
+    (snapshot.blobs[0] as { content: string }).content = "corrupt";
+    const invalidReplacement = await store.importSnapshot(snapshot, {
+      replaceExisting: true,
+    });
+    expect("code" in invalidReplacement && invalidReplacement.code).toBe(
+      "invalid_snapshot",
+    );
+    const unchanged = await store.openWorkspace(created.workspace.id);
+    expect("code" in unchanged ? undefined : unchanged.skillMd).toBe(
+      EMPTY_SKILL,
+    );
+  });
+
   it("rejects foreign ownership and existing child-record id collisions", async () => {
     const target = new MemoryWorkspaceStore();
     const existing = await target.createWorkspace({

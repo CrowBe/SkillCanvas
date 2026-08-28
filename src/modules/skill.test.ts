@@ -26,6 +26,14 @@ describe("SKILL.md source", () => {
     expect(reparsed).toEqual(parsed);
   });
 
+  it("rejects a frontmatter delimiter with trailing content", () => {
+    const parsed = parseSkillMd(
+      "---\nname: invalid\ndescription: Use when testing.\n---oops\n# Body",
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error.code).toBe("invalid_skill");
+  });
+
   it("emits stable lint rules and valid source spans", () => {
     const raw = RAW.replace("test-skill", "Test Skill");
     const lint = analyzeLint(raw);

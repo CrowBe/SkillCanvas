@@ -241,6 +241,13 @@ describe("WebMCP adapter", () => {
     );
     expect(imported.ok).toBe(true);
     expect(current).toBe(created.value.workspace.id);
+
+    const collision = await execute(
+      handlers.find((item) => item.name === "workspace_snapshot_import")!,
+      { json: exported.value },
+    );
+    expect(collision.ok).toBe(false);
+    expect(collision.error.code).toBe("invalid_snapshot");
   });
 
   it("guards failures from run-scoped mock tools", async () => {

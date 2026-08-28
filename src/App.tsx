@@ -396,7 +396,25 @@ export function App({
     } else setStatus(result.error.message);
   }
   async function importWorkbenchSnapshot(file: File) {
-    const result = await workspaceService.importSnapshot(await file.text());
+    const json = await file.text();
+    const inspection = await workspaceService.inspectSnapshotImport(json);
+    if (!inspection.ok) {
+      setStatus(inspection.error.message);
+      return;
+    }
+    let result;
+    if (inspection.value.collision) {
+      const confirmed = window.confirm(
+        `Replace saved workspace “${inspection.value.workspace.name}”? This will permanently replace its local revisions and evidence with the imported snapshot.`,
+      );
+      if (!confirmed) {
+        setStatus("Snapshot import cancelled; the saved workspace was unchanged.");
+        return;
+      }
+      result = await workspaceService.replaceSnapshot(json);
+    } else {
+      result = await workspaceService.importSnapshot(json);
+    }
     if (result.ok) {
       loadBundle(result.value);
       setStatus("Workbench snapshot imported.");

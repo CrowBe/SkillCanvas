@@ -101,7 +101,11 @@ export interface WorkspaceService {
   ): Promise<Result<{ evaluation: EvaluationRecord; output: unknown }>>;
   exportSkill(workspaceId: string): Promise<Result<Uint8Array>>;
   exportSnapshot(workspaceId: string): Promise<Result<string>>;
+  inspectSnapshotImport(json: string): Promise<
+    Result<{ workspace: WorkspaceRecord; collision: boolean }>
+  >;
   importSnapshot(json: string): Promise<Result<WorkspaceBundle>>;
+  replaceSnapshot(json: string): Promise<Result<WorkspaceBundle>>;
 }
 
 export type CompareArtifact = {
@@ -345,7 +349,33 @@ export function createWorkspaceService(
         ? { ok: false, error: snapshot }
         : ok(JSON.stringify(snapshot, null, 2));
     },
+    async inspectSnapshotImport(json) {
+      const decoded = decodeSnapshot(json);
+      if (!decoded.ok) return decoded;
+      const workspaces = await store.listWorkspaces();
+      return ok({
+        workspace: decoded.value.workspace,
+        collision: workspaces.some(
+          (workspace) => workspace.id === decoded.value.workspace.id,
+        ),
+      });
+    },
     async importSnapshot(json) {
+      const decoded = decodeSnapshot(json);
+      if (!decoded.ok) return decoded;
+      return fromStore(await store.importSnapshot(decoded.value));
+    },
+    async replaceSnapshot(json) {
+      const decoded = decodeSnapshot(json);
+      if (!decoded.ok) return decoded;
+      return fromStore(
+        await store.importSnapshot(decoded.value, { replaceExisting: true }),
+      );
+    },
+  };
+}
+
+function decodeSnapshot(json: string): Result<WorkspaceSnapshot> {
       if (byteLength(json) > SNAPSHOT_MAX_BYTES)
         return err(
           "size_limit",
@@ -359,10 +389,7 @@ export function createWorkspaceService(
       }
       const shape = validateSnapshotShape(snapshot);
       if (!shape.ok) return shape;
-      const result = await store.importSnapshot(snapshot);
-      return fromStore(result);
-    },
-  };
+      return ok(snapshot);
 }
 
 function validateInput(

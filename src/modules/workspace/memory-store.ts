@@ -37,6 +37,7 @@ function snapshotRecordError<T extends { id: string; workspaceId: string }>(
   existing: ReadonlyMap<string, T>,
   workspaceId: string,
   label: string,
+  replacedWorkspaceId?: string,
 ): DomainError | null {
   const ids = new Set<string>();
   for (const record of records) {
@@ -45,7 +46,11 @@ function snapshotRecordError<T extends { id: string; workspaceId: string }>(
         "invalid_snapshot",
         `Snapshot ${label} records belong to another workspace.`,
       );
-    if (ids.has(record.id) || existing.has(record.id))
+    const existingRecord = existing.get(record.id);
+    if (
+      ids.has(record.id) ||
+      (existingRecord?.workspaceId !== replacedWorkspaceId && existingRecord)
+    )
       return domainError(
         "invalid_snapshot",
         `Snapshot ${label} id ${record.id} collides with existing data.`,
@@ -246,20 +251,26 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
 
   async importSnapshot(
     snapshot: WorkspaceSnapshot,
+    options: { replaceExisting?: boolean } = {},
   ): Promise<WorkspaceBundle | DomainError> {
-    const existing = await this.exportSnapshot(snapshot.workspace.id);
-    if (!("code" in existing)) this.removeWorkspace(snapshot.workspace.id);
-    const imported = await this.admitSnapshot(snapshot);
-    if ("code" in imported && !("code" in existing)) {
-      const restored = await this.admitSnapshot(existing);
-      if ("code" in restored) throw new Error(restored.message);
-    }
-    return imported;
+    const validation = await this.validateSnapshot(snapshot, options);
+    if (validation) return validation;
+    if (options.replaceExisting) this.removeWorkspace(snapshot.workspace.id);
+    return this.admitSnapshot(snapshot);
   }
 
-  private async admitSnapshot(
+  async validateSnapshot(
     snapshot: WorkspaceSnapshot,
-  ): Promise<WorkspaceBundle | DomainError> {
+    options: { replaceExisting?: boolean } = {},
+  ): Promise<DomainError | null> {
+    if (
+      this.state.workspaces.has(snapshot.workspace.id) &&
+      !options.replaceExisting
+    )
+      return domainError(
+        "invalid_snapshot",
+        "A workspace with this id already exists and requires confirmed replacement.",
+      );
     if (snapshot.snapshotVersion !== 1 || snapshot.revisions.length === 0)
       return domainError(
         "invalid_snapshot",
@@ -305,20 +316,52 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
         this.state.artifacts,
         snapshot.workspace.id,
         "artifact",
+        options.replaceExisting ? snapshot.workspace.id : undefined,
       ) ??
       snapshotRecordError(
         snapshot.evaluations,
         this.state.evaluations,
         snapshot.workspace.id,
         "evaluation",
+        options.replaceExisting ? snapshot.workspace.id : undefined,
       ) ??
       snapshotRecordError(
         snapshot.auditEvents,
         this.state.auditEvents,
         snapshot.workspace.id,
         "audit event",
+        options.replaceExisting ? snapshot.workspace.id : undefined,
       );
     if (recordError) return recordError;
+    return null;
+  }
+
+  referencesBlobOutsideWorkspace(hash: string, workspaceId: string): boolean {
+    return [...this.state.revisions.entries()].some(
+      ([id, revisions]) =>
+        id !== workspaceId &&
+        revisions.some(
+          (revision) =>
+            revision.contentHash === hash ||
+            revision.references.some(
+              (reference) => reference.contentHash === hash,
+            ),
+        ),
+    );
+  }
+
+  loadValidatedSnapshot(
+    snapshot: WorkspaceSnapshot,
+    options: { replaceExisting?: boolean } = {},
+  ): WorkspaceBundle {
+    if (options.replaceExisting) this.removeWorkspace(snapshot.workspace.id);
+    return this.admitSnapshot(snapshot);
+  }
+
+  private admitSnapshot(snapshot: WorkspaceSnapshot): WorkspaceBundle {
+    const revisions = [...snapshot.revisions].sort(
+      (a, b) => a.revision - b.revision,
+    );
     snapshot.blobs.forEach((blob) =>
       this.state.blobs.set(blob.hash, structuredClone(blob)),
     );
@@ -350,7 +393,9 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
   ): Promise<void> {
     this.removeWorkspace(workspaceId);
     if (snapshot) {
-      const restored = await this.importSnapshot(snapshot);
+      const restored = await this.importSnapshot(snapshot, {
+        replaceExisting: true,
+      });
       if ("code" in restored) throw new Error(restored.message);
     }
   }

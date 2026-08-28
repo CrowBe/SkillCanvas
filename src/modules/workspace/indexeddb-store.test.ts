@@ -5,15 +5,17 @@ import { IndexedDbWorkspaceStore } from "./indexeddb-store";
 
 function databaseControl() {
   let failWrites = false;
+  const deletedBlobs: string[] = [];
   const database = {
     getAll: async () => [],
     transaction: () => ({
-      objectStore: () => ({
+      objectStore: (name: string) => ({
         put: async () => {
           if (failWrites) throw new Error("persistence failed");
         },
-        delete: async () => {
+        delete: async (key: string) => {
           if (failWrites) throw new Error("persistence failed");
+          if (name === "blobs") deletedBlobs.push(key);
         },
       }),
       done: Promise.resolve(),
@@ -27,6 +29,7 @@ function databaseControl() {
     allowWrites() {
       failWrites = false;
     },
+    deletedBlobs,
   };
 }
 
@@ -103,11 +106,41 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       actor: "human",
     });
     if ("code" in updated) throw new Error(updated.message);
-    const restored = await store.importSnapshot(snapshot);
+    const restored = await store.importSnapshot(snapshot, {
+      replaceExisting: true,
+    });
     if ("code" in restored) throw new Error(restored.message);
     expect(restored.revision.revision).toBe(1);
     expect("code" in (await store.openWorkspace(created.workspace.id, 2))).toBe(
       true,
+    );
+    expect(control.deletedBlobs).toContain(updated.revision.contentHash);
+  });
+
+  it("keeps the prior workspace visible when replacement persistence fails", async () => {
+    const control = databaseControl();
+    const store = new IndexedDbWorkspaceStore(control.database);
+    const created = await store.createWorkspace({
+      name: "durable",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    const snapshot = await store.exportSnapshot(created.workspace.id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    const updated = await store.appendRevision({
+      workspaceId: created.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nKeep this revision.`,
+      actor: "human",
+    });
+    if ("code" in updated) throw new Error(updated.message);
+    control.failNextWrites();
+    await expect(
+      store.importSnapshot(snapshot, { replaceExisting: true }),
+    ).rejects.toThrow("persistence failed");
+    const unchanged = await store.openWorkspace(created.workspace.id);
+    expect("code" in unchanged ? undefined : unchanged.revision.revision).toBe(
+      2,
     );
   });
 });

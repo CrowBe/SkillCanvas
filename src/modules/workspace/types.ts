@@ -109,6 +109,7 @@ export interface WorkspaceStore {
   exportSnapshot(workspaceId: string): Promise<WorkspaceSnapshot | DomainError>;
   importSnapshot(
     snapshot: WorkspaceSnapshot,
+    options?: { replaceExisting?: boolean },
   ): Promise<WorkspaceBundle | DomainError>;
 }
 

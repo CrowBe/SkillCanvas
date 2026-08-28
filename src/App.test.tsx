@@ -6,7 +6,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelContextAdapter, WebMcpTool } from "./modules/webmcp";
 import { EMPTY_SKILL } from "./modules/skill";
 import { MemoryWorkspaceStore } from "./modules/workspace/memory-store";
@@ -90,5 +90,33 @@ describe("App WebMCP registration lifecycle", () => {
     expect(sessionStorage.getItem("skill-canvas:open-workspace")).toBe(
       created.value.workspace.id,
     );
+  });
+
+  it("warns before replacing a saved workspace snapshot", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await workspaceService.create({ name: "Saved Workspace" });
+    if (!created.ok) throw new Error(created.error.message);
+    const exported = await workspaceService.exportSnapshot(
+      created.value.workspace.id,
+    );
+    if (!exported.ok) throw new Error(exported.error.message);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    const file = Object.assign(
+      new File([exported.value], "workspace.json", {
+        type: "application/json",
+      }),
+      { text: async () => exported.value },
+    );
+    fireEvent.change(screen.getByLabelText("Import workbench snapshot"), {
+      target: { files: [file] },
+    });
+    expect(
+      await screen.findByText(/Snapshot import cancelled/),
+    ).toBeInTheDocument();
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("permanently"));
+    expect(await workspaceService.list()).toHaveLength(1);
+    confirm.mockRestore();
   });
 });

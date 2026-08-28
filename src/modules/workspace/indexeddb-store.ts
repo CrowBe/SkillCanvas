@@ -105,6 +105,15 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     if ("code" in snapshot) throw new Error(snapshot.message);
     const db = await this.db();
     const transaction = db.transaction([...STORES], "readwrite");
+    const currentHashes = new Set(snapshot.blobs.map((blob) => blob.hash));
+    const staleHashes =
+      previous?.blobs
+        .map((blob) => blob.hash)
+        .filter(
+          (hash) =>
+            !currentHashes.has(hash) &&
+            !this.memory.referencesBlobOutsideWorkspace(hash, workspaceId),
+        ) ?? [];
     await Promise.all([
       ...(previous?.revisions.map((revision) =>
         transaction
@@ -120,6 +129,9 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       ...(previous?.auditEvents.map((event) =>
         transaction.objectStore("auditEvents").delete(event.id),
       ) ?? []),
+      ...staleHashes.map((hash) =>
+        transaction.objectStore("blobs").delete(hash),
+      ),
       transaction.objectStore("workspaces").put(snapshot.workspace),
       ...snapshot.revisions.map((revision) =>
         transaction.objectStore("revisions").put({
@@ -161,27 +173,24 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       const previous = targetWorkspaceId
         ? await this.memory.exportSnapshot(targetWorkspaceId)
         : undefined;
-      let mutatedWorkspaceId = targetWorkspaceId;
-      try {
-        const result = await operation(this.memory);
-        const id = workspaceId(result);
-        if (id !== undefined) {
-          mutatedWorkspaceId = id;
-          await this.persist(
-            this.memory,
-            id,
-            previous && !("code" in previous) ? previous : undefined,
-          );
-        }
-        return result;
-      } catch (error) {
-        if (mutatedWorkspaceId)
-          await this.memory.restoreWorkspace(
-            mutatedWorkspaceId,
-            previous && !("code" in previous) ? previous : undefined,
-          );
-        throw error;
+      const staged = new MemoryWorkspaceStore();
+      if (previous && !("code" in previous)) {
+        staged.loadValidatedSnapshot(previous);
       }
+      const result = await operation(staged);
+      const id = workspaceId(result);
+      if (id === undefined) return result;
+      await this.persist(
+        staged,
+        id,
+        previous && !("code" in previous) ? previous : undefined,
+      );
+      const committed = await staged.exportSnapshot(id);
+      if ("code" in committed) throw new Error(committed.message);
+      this.memory.loadValidatedSnapshot(committed, {
+        replaceExisting: true,
+      });
+      return result;
     });
   }
 
@@ -246,10 +255,15 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     await this.hydrate();
     return this.memory.exportSnapshot(workspaceId);
   }
-  async importSnapshot(snapshot: WorkspaceSnapshot) {
+  async importSnapshot(
+    snapshot: WorkspaceSnapshot,
+    options: { replaceExisting?: boolean } = {},
+  ) {
     await this.hydrate();
+    const validation = await this.memory.validateSnapshot(snapshot, options);
+    if (validation) return validation;
     return this.commitMutation(
-      (staged) => staged.importSnapshot(snapshot),
+      async (staged) => staged.loadValidatedSnapshot(snapshot, options),
       (result) => ("code" in result ? undefined : result.workspace.id),
       snapshot.workspace.id,
     );

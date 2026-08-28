@@ -131,7 +131,9 @@ describe("WorkspaceService", () => {
       actor: "human",
     });
     if (!updated.ok) throw new Error(updated.error.message);
-    const restored = await service.importSnapshot(exported.value);
+    const collision = await service.importSnapshot(exported.value);
+    expect(collision.ok).toBe(false);
+    const restored = await service.replaceSnapshot(exported.value);
     expect(restored.ok).toBe(true);
     if (!restored.ok) return;
     expect(restored.value.revision.revision).toBe(1);
