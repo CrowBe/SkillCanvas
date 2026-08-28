@@ -24,13 +24,18 @@ const STORES = [
 /**
  * Durable browser adapter. Domain behavior remains in the memory contract
  * implementation; this adapter hydrates/persists the same bounded records in
- * separate versioned object stores. Immutable blobs are keyed by canonical
+ * separate versioned object stores. Immutable blobs are keyed by byte-exact
  * hash, so identical SKILL.md/reference content is stored once.
  */
 export class IndexedDbWorkspaceStore implements WorkspaceStore {
-  private readonly memory = new MemoryWorkspaceStore();
+  private memory = new MemoryWorkspaceStore();
   private database?: IDBPDatabase;
   private hydrated = false;
+  private mutationQueue: Promise<void> = Promise.resolve();
+
+  constructor(database?: IDBPDatabase) {
+    this.database = database;
+  }
 
   private async db(): Promise<IDBPDatabase> {
     if (this.database) return this.database;
@@ -91,8 +96,11 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     this.hydrated = true;
   }
 
-  private async persist(workspaceId: string): Promise<void> {
-    const snapshot = await this.memory.exportSnapshot(workspaceId);
+  private async persist(
+    memory: MemoryWorkspaceStore,
+    workspaceId: string,
+  ): Promise<void> {
+    const snapshot = await memory.exportSnapshot(workspaceId);
     if ("code" in snapshot) throw new Error(snapshot.message);
     const db = await this.db();
     const transaction = db.transaction([...STORES], "readwrite");
@@ -120,13 +128,50 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     ]);
   }
 
+  private async stageMemory(): Promise<MemoryWorkspaceStore> {
+    const staged = new MemoryWorkspaceStore();
+    for (const workspace of await this.memory.listWorkspaces()) {
+      const snapshot = await this.memory.exportSnapshot(workspace.id);
+      if ("code" in snapshot) throw new Error(snapshot.message);
+      const imported = await staged.importSnapshot(snapshot);
+      if ("code" in imported) throw new Error(imported.message);
+    }
+    return staged;
+  }
+
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationQueue.then(operation, operation);
+    this.mutationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async commitMutation<T>(
+    operation: (staged: MemoryWorkspaceStore) => Promise<T>,
+    workspaceId: (result: T) => string | undefined,
+  ): Promise<T> {
+    return this.enqueueMutation(async () => {
+      const staged = await this.stageMemory();
+      const result = await operation(staged);
+      const id = workspaceId(result);
+      if (id !== undefined) {
+        await this.persist(staged, id);
+        this.memory = staged;
+      }
+      return result;
+    });
+  }
+
   async createWorkspace(
     input: Parameters<WorkspaceStore["createWorkspace"]>[0],
   ): Promise<WorkspaceBundle> {
     await this.hydrate();
-    const bundle = await this.memory.createWorkspace(input);
-    await this.persist(bundle.workspace.id);
-    return bundle;
+    return this.commitMutation(
+      (staged) => staged.createWorkspace(input),
+      (bundle) => bundle.workspace.id,
+    );
   }
   async listWorkspaces() {
     await this.hydrate();
@@ -138,24 +183,37 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   }
   async appendRevision(input: Parameters<WorkspaceStore["appendRevision"]>[0]) {
     await this.hydrate();
-    const result = await this.memory.appendRevision(input);
-    if (!("code" in result)) await this.persist(input.workspaceId);
-    return result;
+    return this.commitMutation(
+      (staged) => staged.appendRevision(input),
+      (result) => ("code" in result ? undefined : input.workspaceId),
+    );
   }
   async putArtifact(artifact: ArtifactRecord) {
     await this.hydrate();
-    await this.memory.putArtifact(artifact);
-    await this.persist(artifact.workspaceId);
+    await this.commitMutation(
+      async (staged) => {
+        await staged.putArtifact(artifact);
+      },
+      () => artifact.workspaceId,
+    );
   }
   async recordEvaluationEvidence(evaluation: EvaluationRecord) {
     await this.hydrate();
-    await this.memory.recordEvaluationEvidence(evaluation);
-    await this.persist(evaluation.workspaceId);
+    await this.commitMutation(
+      async (staged) => {
+        await staged.recordEvaluationEvidence(evaluation);
+      },
+      () => evaluation.workspaceId,
+    );
   }
   async appendAuditEvent(event: AuditEvent) {
     await this.hydrate();
-    await this.memory.appendAuditEvent(event);
-    await this.persist(event.workspaceId);
+    await this.commitMutation(
+      async (staged) => {
+        await staged.appendAuditEvent(event);
+      },
+      () => event.workspaceId,
+    );
   }
   async exportSnapshot(
     workspaceId: string,
@@ -165,8 +223,9 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   }
   async importSnapshot(snapshot: WorkspaceSnapshot) {
     await this.hydrate();
-    const result = await this.memory.importSnapshot(snapshot);
-    if (!("code" in result)) await this.persist(result.workspace.id);
-    return result;
+    return this.commitMutation(
+      (staged) => staged.importSnapshot(snapshot),
+      (result) => ("code" in result ? undefined : result.workspace.id),
+    );
   }
 }

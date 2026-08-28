@@ -357,9 +357,13 @@ export function createWorkspaceService(
 }
 
 function validateInput(
-  skillMd: string,
-  files: readonly { path: string; content: string }[],
+  skillMd: unknown,
+  files: unknown,
 ): Result<readonly { path: string; content: string }[]> {
+  if (typeof skillMd !== "string")
+    return err("invalid_submission", "SKILL.md content must be a string.");
+  if (!Array.isArray(files))
+    return err("invalid_submission", "Reference files must be an array.");
   const parsed = parseSkillMd(skillMd);
   if (!parsed.ok) return parsed;
   if (files.length > REFERENCES_MAX)
@@ -370,14 +374,24 @@ function validateInput(
   const normalized: { path: string; content: string }[] = [];
   const seen = new Set<string>();
   for (const file of files) {
-    const path = normalizeReferencePath(file.path);
+    if (
+      !isSchemaObject(file) ||
+      typeof (file as Record<string, unknown>).path !== "string" ||
+      typeof (file as Record<string, unknown>).content !== "string"
+    )
+      return err(
+        "invalid_submission",
+        "Each reference file requires string path and content fields.",
+      );
+    const shaped = file as { path: string; content: string };
+    const path = normalizeReferencePath(shaped.path);
     if (!path.ok) return path;
     if (seen.has(path.value.toLowerCase()))
       return err("duplicate_path", `Duplicate normalized path: ${path.value}`);
-    if (byteLength(file.content) > REFERENCE_MAX_BYTES)
+    if (byteLength(shaped.content) > REFERENCE_MAX_BYTES)
       return err("size_limit", `Reference file ${path.value} is too large.`);
     seen.add(path.value.toLowerCase());
-    normalized.push({ path: path.value, content: file.content });
+    normalized.push({ path: path.value, content: shaped.content });
   }
   return ok(normalized);
 }
@@ -411,17 +425,84 @@ function summary(lint: LintArtifact) {
 function lineDiff(before: string, after: string) {
   const left = before.split("\n");
   const right = after.split("\n");
-  const max = Math.max(left.length, right.length);
-  const changedLines: number[] = [];
+  const common = longestCommonSubsequence(left, right);
+  const changedLines = new Set<number>();
   let additions = 0;
   let deletions = 0;
-  for (let index = 0; index < max; index += 1)
-    if (left[index] !== right[index]) {
-      changedLines.push(index + 1);
-      if (right[index] !== undefined) additions += 1;
-      if (left[index] !== undefined) deletions += 1;
-    }
-  return { additions, deletions, changedLines };
+  let leftIndex = 0;
+  let rightIndex = 0;
+  for (const [nextLeft, nextRight] of [
+    ...common,
+    [left.length, right.length] as const,
+  ]) {
+    deletions += nextLeft - leftIndex;
+    additions += nextRight - rightIndex;
+    for (let index = rightIndex; index < nextRight; index += 1)
+      changedLines.add(index + 1);
+    if (nextLeft > leftIndex && nextRight === rightIndex)
+      changedLines.add(Math.min(rightIndex + 1, Math.max(right.length, 1)));
+    leftIndex = nextLeft + 1;
+    rightIndex = nextRight + 1;
+  }
+  return {
+    additions,
+    deletions,
+    changedLines: [...changedLines].sort((a, b) => a - b),
+  };
+}
+
+function longestCommonSubsequence(
+  left: readonly string[],
+  right: readonly string[],
+  leftOffset = 0,
+  rightOffset = 0,
+): readonly (readonly [number, number])[] {
+  if (left.length === 0 || right.length === 0) return [];
+  if (left.length === 1) {
+    const match = right.indexOf(left[0]!);
+    return match < 0 ? [] : [[leftOffset, rightOffset + match]];
+  }
+  const middle = Math.floor(left.length / 2);
+  const prefix = lcsLengths(left.slice(0, middle), right);
+  const suffix = lcsLengths(left.slice(middle).reverse(), [...right].reverse());
+  let split = 0;
+  for (let index = 1; index <= right.length; index += 1)
+    if (
+      prefix[index]! + suffix[right.length - index]! >
+      prefix[split]! + suffix[right.length - split]!
+    )
+      split = index;
+  return [
+    ...longestCommonSubsequence(
+      left.slice(0, middle),
+      right.slice(0, split),
+      leftOffset,
+      rightOffset,
+    ),
+    ...longestCommonSubsequence(
+      left.slice(middle),
+      right.slice(split),
+      leftOffset + middle,
+      rightOffset + split,
+    ),
+  ];
+}
+
+function lcsLengths(
+  left: readonly string[],
+  right: readonly string[],
+): number[] {
+  let previous = Array<number>(right.length + 1).fill(0);
+  for (const line of left) {
+    const current = Array<number>(right.length + 1).fill(0);
+    for (let index = 0; index < right.length; index += 1)
+      current[index + 1] =
+        line === right[index]
+          ? previous[index]! + 1
+          : Math.max(current[index]!, previous[index + 1]!);
+    previous = current;
+  }
+  return previous;
 }
 function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   if (!value || typeof value !== "object")
@@ -561,9 +642,19 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
       for (const choice of (item as { choices: unknown[] }).choices)
         if (
           !isSchemaObject(choice) ||
-          typeof (choice as Record<string, unknown>).id !== "string"
+          typeof (choice as Record<string, unknown>).id !== "string" ||
+          typeof (choice as Record<string, unknown>).name !== "string" ||
+          typeof (choice as Record<string, unknown>).description !== "string" ||
+          typeof (choice as Record<string, unknown>).candidate !== "boolean"
         )
-          return "a triggering choice requires an id.";
+          return "a triggering choice requires id, name, description, and candidate fields.";
+      const choices = (item as { choices: Array<Record<string, unknown>> })
+        .choices;
+      if (
+        new Set(choices.map((choice) => choice.id)).size !== choices.length ||
+        choices.filter((choice) => choice.candidate).length !== 1
+      )
+        return "a triggering case requires unique choice ids and exactly one candidate.";
     }
     for (const observation of record.observations)
       if (
@@ -600,5 +691,5 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
       return "test-run checks must be an array.";
     return null;
   }
-  return null;
+  return "unsupported evaluation kind.";
 }

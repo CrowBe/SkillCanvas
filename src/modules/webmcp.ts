@@ -266,14 +266,28 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
           result.value.kind === "test-run" &&
           runtime.registerMockForRun
         ) {
-          const mockToolName = await runtime.registerMockForRun(
-            result.value.id,
-            (result.value.data as any).contract.name,
-          );
-          return bundleEnvelope(
-            { ok: true, value: { evaluation: result.value, mockToolName } },
-            bundle.value,
-          );
+          try {
+            const mockToolName = await runtime.registerMockForRun(
+              result.value.id,
+              (result.value.data as any).contract.name,
+            );
+            return bundleEnvelope(
+              { ok: true, value: { evaluation: result.value, mockToolName } },
+              bundle.value,
+            );
+          } catch {
+            return bundleEnvelope(
+              {
+                ok: true,
+                value: {
+                  evaluation: result.value,
+                  mockToolName: null,
+                  manualFallback: true,
+                },
+              },
+              bundle.value,
+            );
+          }
         }
         return bundleEnvelope(result, bundle.value);
       },

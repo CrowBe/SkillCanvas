@@ -32,6 +32,29 @@ const domainError = (
   details?: Record<string, unknown>,
 ): DomainError => ({ code, message, ...(details ? { details } : {}) });
 
+function snapshotRecordError<T extends { id: string; workspaceId: string }>(
+  records: readonly T[],
+  existing: ReadonlyMap<string, T>,
+  workspaceId: string,
+  label: string,
+): DomainError | null {
+  const ids = new Set<string>();
+  for (const record of records) {
+    if (record.workspaceId !== workspaceId)
+      return domainError(
+        "invalid_snapshot",
+        `Snapshot ${label} records belong to another workspace.`,
+      );
+    if (ids.has(record.id) || existing.has(record.id))
+      return domainError(
+        "invalid_snapshot",
+        `Snapshot ${label} id ${record.id} collides with existing data.`,
+      );
+    ids.add(record.id);
+  }
+  return null;
+}
+
 export class MemoryWorkspaceStore implements WorkspaceStore {
   protected readonly state: State = {
     workspaces: new Map(),
@@ -246,6 +269,44 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       )
     )
       return domainError("invalid_snapshot", "Revision lineage is invalid.");
+    if (
+      !revisions.some(
+        (revision) => revision.revision === snapshot.workspace.currentRevision,
+      )
+    )
+      return domainError(
+        "invalid_snapshot",
+        "The current workspace revision is missing from the snapshot.",
+      );
+    if (
+      revisions.some(
+        (revision) => revision.workspaceId !== snapshot.workspace.id,
+      )
+    )
+      return domainError(
+        "invalid_snapshot",
+        "Snapshot revisions belong to another workspace.",
+      );
+    const recordError =
+      snapshotRecordError(
+        snapshot.artifacts,
+        this.state.artifacts,
+        snapshot.workspace.id,
+        "artifact",
+      ) ??
+      snapshotRecordError(
+        snapshot.evaluations,
+        this.state.evaluations,
+        snapshot.workspace.id,
+        "evaluation",
+      ) ??
+      snapshotRecordError(
+        snapshot.auditEvents,
+        this.state.auditEvents,
+        snapshot.workspace.id,
+        "audit event",
+      );
+    if (recordError) return recordError;
     snapshot.blobs.forEach((blob) =>
       this.state.blobs.set(blob.hash, structuredClone(blob)),
     );

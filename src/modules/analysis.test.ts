@@ -45,6 +45,24 @@ describe("analyzeStructure", () => {
         ),
       ).toContain(section.title);
   });
+
+  it("does not treat an annotated fence line as a closing fence", () => {
+    const raw = [
+      "---",
+      "name: fenced-example-skill",
+      "description: Use when fenced examples need analysis.",
+      "---",
+      "",
+      "```md",
+      "```not-a-close",
+      "# Still hidden",
+      "```",
+    ].join("\n");
+    expect(analyzeStructure(raw).sections).toEqual([]);
+    expect(
+      analyzeLint(raw).findings.some((item) => item.rule === "body.structure"),
+    ).toBe(true);
+  });
 });
 
 describe("analyzeLint", () => {

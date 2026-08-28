@@ -33,7 +33,7 @@ describe("WorkspaceService", () => {
     expect(prior.ok && prior.value.skillMd).toBe(created.value.skillMd);
   });
 
-  it("deduplicates canonical blobs and exports a metadata-free Skill zip", async () => {
+  it("deduplicates byte-identical blobs and exports a metadata-free Skill zip", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({
       skillMd: EMPTY_SKILL,
@@ -61,6 +61,25 @@ describe("WorkspaceService", () => {
     expect(
       Object.keys(zip.files).some((name) => name.includes("workbench")),
     ).toBe(false);
+  });
+
+  it("preserves line endings as part of blob identity", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [
+        { path: "references/lf.md", content: "one\ntwo\n" },
+        { path: "references/crlf.md", content: "one\r\ntwo\r\n" },
+      ],
+    });
+    if (!created.ok) throw new Error(created.error.message);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    expect(snapshot.blobs).toHaveLength(3);
+    expect(snapshot.blobs.map((blob: any) => blob.content)).toEqual(
+      expect.arrayContaining(["one\ntwo\n", "one\r\ntwo\r\n"]),
+    );
   });
 
   it("rejects traversal and duplicate normalized paths", async () => {
@@ -101,6 +120,20 @@ describe("WorkspaceService", () => {
 });
 
 describe("WorkspaceService input validation", () => {
+  it("returns invalid_submission for malformed Skill input shapes", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const badSkill = await service.create({ skillMd: 42 as never });
+    expect(badSkill.ok).toBe(false);
+    if (!badSkill.ok) expect(badSkill.error.code).toBe("invalid_submission");
+    const badReferences = await service.create({
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [{ path: "guide.md" } as never],
+    });
+    expect(badReferences.ok).toBe(false);
+    if (!badReferences.ok)
+      expect(badReferences.error.code).toBe("invalid_submission");
+  });
+
   it("returns a typed error for a malformed instruction map instead of throwing", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });
@@ -146,6 +179,39 @@ describe("WorkspaceService input validation", () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("invalid_submission");
+  });
+});
+
+describe("comparison source diff", () => {
+  it("counts inserted lines without treating shifted lines as replacements", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const before = [
+      "---",
+      "name: diff-skill",
+      "description: Use when a line diff is needed.",
+      "---",
+      "",
+      "# A",
+      "B",
+    ].join("\n");
+    const created = await service.create({ skillMd: before });
+    if (!created.ok) throw new Error(created.error.message);
+    const after = before.replace("# A\nB", "# X\n# A\nB");
+    const updated = await service.update({
+      workspaceId: created.value.workspace.id,
+      baseRevision: 1,
+      skillMd: after,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const compared = await service.compare(created.value.workspace.id, 1, 2);
+    expect(compared.ok).toBe(true);
+    if (compared.ok)
+      expect(compared.value.source).toEqual({
+        additions: 1,
+        deletions: 0,
+        changedLines: [6],
+      });
   });
 });
 
@@ -332,5 +398,88 @@ describe("snapshot import triggering case guards", () => {
       expect(imported.ok).toBe(false);
       if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
     }
+  });
+
+  it("grades the selected choice candidate flag instead of a magic id", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const prepared = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const triggering = snapshot.evaluations.find(
+      (item: any) => item.kind === "triggering",
+    );
+    for (const testCase of triggering.data.cases)
+      testCase.choices.find((choice: any) => choice.candidate).id = "skill-1";
+    const importer = createWorkspaceService(new MemoryWorkspaceStore());
+    const imported = await importer.importSnapshot(JSON.stringify(snapshot));
+    if (!imported.ok) throw new Error(imported.error.message);
+    const record = imported.value.evaluations.find(
+      (item) => item.kind === "triggering",
+    )!;
+    const firstCase = (record.data as any).cases[0];
+    const graded = await importer.submitEvaluation(
+      imported.value.workspace.id,
+      record.id,
+      {
+        caseId: firstCase.id,
+        selectedChoiceId: "skill-1",
+        rationale: "This is the candidate Skill.",
+      },
+    );
+    expect(graded.ok).toBe(true);
+    if (graded.ok)
+      expect((graded.value.data as any).observations[0].passed).toBe(true);
+  });
+
+  it("rejects incomplete triggering choice records", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const prepared = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const triggering = snapshot.evaluations.find(
+      (item: any) => item.kind === "triggering",
+    );
+    delete triggering.data.cases[0].choices[0].candidate;
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+});
+
+describe("snapshot import evaluation kinds", () => {
+  it("rejects deferred evaluation kinds before rendering", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const prepared = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    snapshot.evaluations[0].kind = "capacity-probe";
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });
 });

@@ -98,7 +98,7 @@ The Chrome DevTools MCP server can instead expose `list_webmcp_tools` and `execu
 
 - Imported content is data only. It is bounded, path-normalized, content-addressed, and never executed.
 - Unknown YAML frontmatter is preserved.
-- Immutable Skill/reference blobs deduplicate by canonical SHA-256.
+- Immutable Skill/reference blobs deduplicate by byte-exact SHA-256.
 - Revision, artifact, evaluation, and audit records point to hashes and carry explicit versions.
 - Skill mutations require `baseRevision`, append an audit event, visibly update the UI, and remain reversible by adding a later revision.
 - `appearance_set` is a visible browser preference. It never changes a Skill revision, content hash, evaluation artifact, snapshot, or Skill export.

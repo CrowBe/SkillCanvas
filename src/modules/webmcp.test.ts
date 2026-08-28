@@ -142,6 +142,46 @@ describe("WebMCP adapter", () => {
     );
     expect(mock.signal?.aborted).toBe(true);
   });
+
+  it("returns a prepared run with manual fallback when mock registration fails", async () => {
+    let current: string | null = null;
+    const handlers = createToolHandlers({
+      service: createWorkspaceService(new MemoryWorkspaceStore()),
+      appearance: appearance(),
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
+      registerMockForRun: async () => {
+        throw new Error("native registration failed");
+      },
+    });
+    await execute(
+      handlers.find((item) => item.name === "skill_open")!,
+      {
+        skillMd:
+          "---\nname: demo-skill\ndescription: Use when a deterministic demo is requested.\n---\n\n# Demo\n\nFollow the workflow carefully.",
+      },
+    );
+    const prepared = await execute(
+      handlers.find((item) => item.name === "evaluation_prepare")!,
+      {
+        kind: "test-run",
+        contract: {
+          name: "read_demo",
+          description: "Read demo data",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object" },
+        },
+      },
+    );
+    expect(prepared.ok).toBe(true);
+    expect(prepared.data.manualFallback).toBe(true);
+    expect(prepared.data.mockToolName).toBeNull();
+    expect(prepared.data.evaluation.kind).toBe("test-run");
+  });
 });
 
 describe("WebMCP registration failures", () => {

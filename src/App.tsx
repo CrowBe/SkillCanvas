@@ -290,11 +290,15 @@ export function App() {
     setEvaluation(result.value);
     setPanel("evaluate");
     if (registrationRef.current?.available) {
-      const toolName = await registrationRef.current.registerMock(
-        result.value.id,
-        SAMPLE_CONTRACT.name,
-      );
-      setStatus(`Mock tool registered as ${toolName}`);
+      try {
+        const toolName = await registrationRef.current.registerMock(
+          result.value.id,
+          SAMPLE_CONTRACT.name,
+        );
+        setStatus(`Mock tool registered as ${toolName}`);
+      } catch {
+        setStatus("WebMCP mock unavailable: use Manual mock invocation below.");
+      }
     } else setStatus("WebMCP unavailable: use Manual mock invocation below.");
   }
   async function invokeManualMock() {

@@ -193,14 +193,17 @@ export function submitTriggering(
       "invalid_submission",
       "Submit the current case before moving to another case.",
     );
-  if (!nextCase.choices.some((choice) => choice.id === input.selectedChoiceId))
+  const selectedChoice = nextCase.choices.find(
+    (choice) => choice.id === input.selectedChoiceId,
+  );
+  if (!selectedChoice)
     return err(
       "invalid_submission",
       "Selected choice is not part of this case.",
     );
   if (input.rationale.trim().length < 3 || input.rationale.length > 300)
     return err("invalid_submission", "Rationale must be 3–300 characters.");
-  const selectedCandidate = input.selectedChoiceId === "candidate";
+  const selectedCandidate = selectedChoice.candidate;
   const passed =
     nextCase.expected === "fire" ? selectedCandidate : !selectedCandidate;
   const observations = [

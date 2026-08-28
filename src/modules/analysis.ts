@@ -89,6 +89,42 @@ function descriptionSpan(
   return spanOf(raw, description) ?? frontmatterKeySpan(raw, "description");
 }
 
+function markdownHeadings(raw: string): readonly {
+  level: number;
+  title: string;
+  sourceSpan: SourceSpan;
+}[] {
+  const headings: { level: number; title: string; sourceSpan: SourceSpan }[] =
+    [];
+  let offset = 0;
+  let fence: string | null = null;
+  for (const line of raw.split("\n")) {
+    if (fence === null) {
+      const opener = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+      if (opener?.[1]) fence = opener[1];
+      else {
+        const heading = line.match(/^(#{1,6})\s+(.+)$/);
+        if (heading?.[1] && heading[2])
+          headings.push({
+            level: heading[1].length,
+            title: heading[2].trim(),
+            sourceSpan: { start: offset, end: offset + line.length },
+          });
+      }
+    } else {
+      const closer = line.match(/^\s{0,3}(`{3,}|~{3,})[ \t]*$/);
+      if (
+        closer?.[1] &&
+        closer[1][0] === fence[0] &&
+        closer[1].length >= fence.length
+      )
+        fence = null;
+    }
+    offset += line.length + 1;
+  }
+  return headings;
+}
+
 export function analyzeLint(
   raw: string,
   referencePaths: readonly string[] = [],
@@ -143,7 +179,9 @@ export function analyzeLint(
         message: "Add enough workflow detail for an agent to act consistently.",
         sourceSpan: spanOf(raw, parsed.value.body.trim()),
       });
-    if (!/^#{1,3}\s+.+$/m.test(parsed.value.body))
+    if (
+      !markdownHeadings(parsed.value.body).some((heading) => heading.level <= 3)
+    )
       findings.push({
         rule: "body.structure",
         severity: "info",
@@ -206,36 +244,11 @@ export function analyzeStructure(raw: string): StructureArtifact {
         },
         body: raw,
       };
-  const sections: Array<{
-    level: number;
-    title: string;
-    sourceSpan: SourceSpan;
-  }> = [];
-  let offset = 0;
-  let fence: string | null = null;
-  for (const line of raw.split("\n")) {
-    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
-    if (fenceMatch?.[1]) {
-      const marker = fenceMatch[1];
-      if (fence === null) fence = marker;
-      else if (marker[0] === fence[0] && marker.length >= fence.length)
-        fence = null;
-    } else if (fence === null) {
-      const heading = line.match(/^(#{1,6})\s+(.+)$/);
-      if (heading?.[1] && heading[2])
-        sections.push({
-          level: heading[1].length,
-          title: heading[2].trim(),
-          sourceSpan: { start: offset, end: offset + line.length },
-        });
-    }
-    offset += line.length + 1;
-  }
   return {
     kind: "structure",
     rulesetVersion: RULESET_VERSION,
     title: source.frontmatter.name,
     description: source.frontmatter.description,
-    sections,
+    sections: markdownHeadings(raw),
   };
 }
