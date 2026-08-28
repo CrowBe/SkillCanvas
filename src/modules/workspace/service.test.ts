@@ -228,6 +228,7 @@ describe("comparison source diff", () => {
         additions: 1,
         deletions: 0,
         changedLines: [6],
+        approximate: false,
       });
   });
 
@@ -264,7 +265,43 @@ describe("comparison source diff", () => {
       expect(compared.value.source.additions).toBe(3000);
       expect(compared.value.source.deletions).toBe(3000);
       expect(compared.value.source.changedLines).toHaveLength(3000);
+      expect(compared.value.source.approximate).toBe(true);
     }
+  });
+
+  it("keeps sparse large changes exact after the matrix budget", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const header = [
+      "---",
+      "name: sparse-diff-skill",
+      "description: Use when sparse changes need exact metadata.",
+      "---",
+      "",
+      "# Data",
+    ];
+    const lines = Array.from({ length: 3000 }, (_, index) => `line-${index}`);
+    const before = [...header, ...lines].join("\n");
+    const changed = [...lines];
+    changed[100] = "changed-100";
+    changed[2900] = "changed-2900";
+    const created = await service.create({ skillMd: before });
+    if (!created.ok) throw new Error(created.error.message);
+    const updated = await service.update({
+      workspaceId: created.value.workspace.id,
+      baseRevision: 1,
+      skillMd: [...header, ...changed].join("\n"),
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const compared = await service.compare(created.value.workspace.id, 1, 2);
+    expect(compared.ok).toBe(true);
+    if (compared.ok)
+      expect(compared.value.source).toEqual({
+        additions: 2,
+        deletions: 2,
+        changedLines: [107, 2907],
+        approximate: false,
+      });
   });
 });
 
@@ -369,6 +406,8 @@ describe("snapshot import evaluation data guards", () => {
       },
     });
     if (!testRun.ok) throw new Error(testRun.error.message);
+    const analyzed = await service.analyze(id, ["lint"]);
+    if (!analyzed.ok) throw new Error(analyzed.error.message);
     const exported = await service.exportSnapshot(id);
     if (!exported.ok) throw new Error(exported.error.message);
     const snapshot = JSON.parse(exported.value);
@@ -454,6 +493,27 @@ describe("snapshot import evaluation data guards", () => {
     for (const mutate of [
       (snapshot: any) => snapshot.artifacts.push(null),
       (snapshot: any) => snapshot.auditEvents.push(null),
+    ]) {
+      const json = await snapshotWith(mutate);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(json);
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
+  it("rejects evidence records linked to unrelated revisions", async () => {
+    for (const mutate of [
+      (snapshot: any) => {
+        snapshot.evaluations[0].contentHash = "unrelated";
+      },
+      (snapshot: any) => {
+        snapshot.artifacts[0].revision = 999;
+      },
+      (snapshot: any) => {
+        snapshot.auditEvents[0].revision = 999;
+      },
     ]) {
       const json = await snapshotWith(mutate);
       const imported = await createWorkspaceService(

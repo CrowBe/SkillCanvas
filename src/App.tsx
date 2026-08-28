@@ -395,6 +395,13 @@ export function App({
       setStatus("Versioned workbench snapshot exported.");
     } else setStatus(result.error.message);
   }
+  async function importWorkbenchSnapshot(file: File) {
+    const result = await workspaceService.importSnapshot(await file.text());
+    if (result.ok) {
+      loadBundle(result.value);
+      setStatus("Workbench snapshot imported.");
+    } else setStatus(result.error.message);
+  }
   function jumpTo(span?: { start: number; end: number }) {
     setView("source");
     requestAnimationFrame(() => {
@@ -475,6 +482,7 @@ export function App({
               )
             }
             onFile={async (file) => create(await file.text())}
+            onSnapshotFile={importWorkbenchSnapshot}
           />
         ) : (
           <>
@@ -615,6 +623,7 @@ export function App({
             compare={compare}
             onCompare={compareRevisions}
             onSnapshot={exportSnapshot}
+            onImportSnapshot={importWorkbenchSnapshot}
           />
         )}
         <footer className="evidence-boundary">
@@ -640,12 +649,14 @@ function Welcome({
   onCreate,
   onEmpty,
   onFile,
+  onSnapshotFile,
 }: {
   workspaces: readonly WorkspaceRecord[];
   onOpen(workspaceId: string): void;
   onCreate(): void;
   onEmpty(): void;
   onFile(file: File): void;
+  onSnapshotFile(file: File): void;
 }) {
   return (
     <section className="welcome">
@@ -674,6 +685,17 @@ function Welcome({
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) onFile(file);
+              }}
+            />
+          </label>
+          <label className="file-button">
+            Import workbench snapshot
+            <input
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) onSnapshotFile(file);
               }}
             />
           </label>
@@ -1047,10 +1069,12 @@ function HistoryPanel({
   compare,
   onCompare,
   onSnapshot,
+  onImportSnapshot,
 }: {
   compare: CompareArtifact | null;
   onCompare(): void;
   onSnapshot(): void;
+  onImportSnapshot(file: File): void;
 }) {
   return (
     <div className="panel-stack">
@@ -1076,6 +1100,9 @@ function HistoryPanel({
             </p>
             <small>
               Changed lines: {compare.source.changedLines.join(", ") || "none"}
+              {compare.source.approximate
+                ? " · approximate for large diff"
+                : ""}
             </small>
           </div>
         </>
@@ -1088,6 +1115,17 @@ function HistoryPanel({
         />
       )}
       <button onClick={onSnapshot}>Export workbench snapshot</button>
+      <label className="file-button">
+        Import workbench snapshot
+        <input
+          type="file"
+          accept=".json,application/json"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) onImportSnapshot(file);
+          }}
+        />
+      </label>
     </div>
   );
 }

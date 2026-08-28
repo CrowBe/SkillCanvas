@@ -5,7 +5,7 @@ import {
   type Result,
   type ToolEnvelope,
 } from "./shared";
-import type { ToolContract } from "./evaluations";
+import { validateSchema, type ToolContract } from "./evaluations";
 import type { WorkspaceBundle } from "./workspace/types";
 import type { WorkspaceService } from "./workspace/service";
 
@@ -51,6 +51,49 @@ type Runtime = {
   unregisterMockForRun?: (evaluationId: string) => void;
 };
 
+function guardTool(
+  tool: WebMcpTool,
+  selection: WorkspaceSelection,
+  workspaceId?: string,
+): WebMcpTool {
+  return {
+    ...tool,
+    execute: async (input, options) => {
+      try {
+        if (tool.inputSchema) {
+          const issues = validateSchema(input, tool.inputSchema);
+          if (issues.length > 0)
+            return {
+              protocolVersion: PROTOCOL_VERSION,
+              ok: false,
+              workspaceId: workspaceId ?? selection.get(),
+              revision: null,
+              contentHash: null,
+              error: {
+                code: "invalid_submission",
+                message: issues.join(" "),
+              },
+            };
+        }
+        return await tool.execute(input, options);
+      } catch (error) {
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          ok: false,
+          workspaceId: workspaceId ?? selection.get(),
+          revision: null,
+          contentHash: null,
+          error: {
+            code: "internal_error",
+            message:
+              error instanceof Error ? error.message : "Tool call failed.",
+          },
+        };
+      }
+    },
+  };
+}
+
 export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
   const bundleEnvelope = <T>(
     result: Result<T>,
@@ -93,27 +136,6 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
     const result = await runtime.service.open(workspaceId);
     if (result.ok) mutate(result.value);
   };
-  const guard = (tool: WebMcpTool): WebMcpTool => ({
-    ...tool,
-    execute: async (input, options) => {
-      try {
-        return await tool.execute(input, options);
-      } catch (error) {
-        return {
-          protocolVersion: PROTOCOL_VERSION,
-          ok: false,
-          workspaceId: runtime.selection.get(),
-          revision: null,
-          contentHash: null,
-          error: {
-            code: "internal_error",
-            message:
-              error instanceof Error ? error.message : "Tool call failed.",
-          },
-        };
-      }
-    },
-  });
   const handlers: readonly WebMcpTool[] = [
     {
       name: "skill_open",
@@ -380,6 +402,22 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       },
     },
     {
+      name: "workspace_snapshot_import",
+      title: "Import Workspace Snapshot",
+      description:
+        "Imports a bounded workbench snapshot with revisions and evidence.",
+      inputSchema: {
+        type: "object",
+        required: ["json"],
+        properties: { json: { type: "string" } },
+      },
+      execute: async (input) => {
+        const result = await runtime.service.importSnapshot(input.json);
+        if (result.ok) mutate(result.value);
+        return bundleEnvelope(result, result.ok ? result.value : undefined);
+      },
+    },
+    {
       name: "appearance_read",
       title: "Read Appearance",
       description:
@@ -440,7 +478,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       },
     },
   ];
-  return handlers.map(guard);
+  return handlers.map((tool) => guardTool(tool, runtime.selection));
 }
 
 export async function registerWebMcpTools(
@@ -465,44 +503,49 @@ export async function registerWebMcpTools(
     const registration = new AbortController();
     mockControllers.set(evaluationId, registration);
     await context.registerTool(
-      {
-        name,
-        title: `Mock ${contractName}`,
-        description: `Invokes the deterministic mock for test run ${evaluationId}.`,
-        inputSchema: { type: "object" },
-        annotations: { untrustedContentHint: true },
-        execute: async (input) => {
-          const result = await runtime.service.invokeMock(
-            workspaceId,
-            evaluationId,
-            input,
-          );
-          if (result.ok) {
-            const refreshed = await runtime.service.open(workspaceId);
-            if (refreshed.ok) runtime.onWorkspaceChange?.(refreshed.value);
-          }
-          return result.ok
-            ? {
-                protocolVersion: PROTOCOL_VERSION,
-                ok: true,
-                workspaceId,
-                revision: result.value.evaluation.revision,
-                contentHash: result.value.evaluation.contentHash,
-                data: {
-                  output: result.value.output,
-                  transcript: (result.value.evaluation.data as any).transcript,
-                },
-              }
-            : {
-                protocolVersion: PROTOCOL_VERSION,
-                ok: false,
-                workspaceId,
-                revision: null,
-                contentHash: null,
-                error: result.error,
-              };
+      guardTool(
+        {
+          name,
+          title: `Mock ${contractName}`,
+          description: `Invokes the deterministic mock for test run ${evaluationId}.`,
+          inputSchema: { type: "object" },
+          annotations: { untrustedContentHint: true },
+          execute: async (input) => {
+            const result = await runtime.service.invokeMock(
+              workspaceId,
+              evaluationId,
+              input,
+            );
+            if (result.ok) {
+              const refreshed = await runtime.service.open(workspaceId);
+              if (refreshed.ok) runtime.onWorkspaceChange?.(refreshed.value);
+            }
+            return result.ok
+              ? {
+                  protocolVersion: PROTOCOL_VERSION,
+                  ok: true,
+                  workspaceId,
+                  revision: result.value.evaluation.revision,
+                  contentHash: result.value.evaluation.contentHash,
+                  data: {
+                    output: result.value.output,
+                    transcript: (result.value.evaluation.data as any)
+                      .transcript,
+                  },
+                }
+              : {
+                  protocolVersion: PROTOCOL_VERSION,
+                  ok: false,
+                  workspaceId,
+                  revision: null,
+                  contentHash: null,
+                  error: result.error,
+                };
+          },
         },
-      },
+        runtime.selection,
+        workspaceId,
+      ),
       { signal: registration.signal },
     );
     return name;

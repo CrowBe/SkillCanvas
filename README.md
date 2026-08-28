@@ -32,6 +32,7 @@ Deploy `dist/` to any HTTPS static host. For a deployed WebMCP origin, enrol tha
 7. Compare revisions and export either:
    - a standard-native zip containing only `SKILL.md` and references; or
    - a versioned workbench snapshot containing revisions, accepted maps, fixtures, evidence, and audit events.
+8. Restore a workbench snapshot from the welcome screen, history panel, or `workspace_snapshot_import` WebMCP tool.
 
 ## Architecture
 
@@ -148,5 +149,5 @@ Deliberately not copied:
 - IndexedDB data is origin- and browser-profile-specific. Cross-device persistence requires exporting/importing a bounded workbench snapshot.
 - The parser preserves unknown frontmatter values semantically; YAML comments and original formatting are not preserved after serialization.
 - The JSON Schema checker intentionally implements a small deterministic subset (`type`, `required`, `properties`, `items`, `enum`, `default`).
-- Source diff metadata is line-oriented rather than a full syntax-aware diff.
+- Source diff metadata is line-oriented rather than a full syntax-aware diff; pathological large regions are bounded and explicitly marked approximate.
 - Native WebMCP support is experimental and can diverge between the draft, Chrome channel, origin trial, DevTools, and browser-agent discovery behavior.

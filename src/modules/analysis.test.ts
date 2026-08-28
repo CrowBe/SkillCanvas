@@ -63,6 +63,31 @@ describe("analyzeStructure", () => {
       analyzeLint(raw).findings.some((item) => item.rule === "body.structure"),
     ).toBe(true);
   });
+
+  it("keeps frontmatter fence text out of body structure state", () => {
+    const raw = [
+      "---",
+      "name: frontmatter-fence-skill",
+      "description: |-",
+      "  Use when frontmatter contains an example fence.",
+      "  ```",
+      "---",
+      "",
+      "# Workflow",
+      "",
+      "Do the work.",
+    ].join("\n");
+    const structure = analyzeStructure(raw);
+    expect(structure.sections.map((section) => section.title)).toEqual([
+      "Workflow",
+    ]);
+    expect(
+      raw.slice(
+        structure.sections[0]!.sourceSpan.start,
+        structure.sections[0]!.sourceSpan.end,
+      ),
+    ).toBe("# Workflow");
+  });
 });
 
 describe("analyzeLint", () => {

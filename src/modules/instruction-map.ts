@@ -240,16 +240,19 @@ export function instructionLoadVector(
       )
         conflictPairs.add(`${a.id}:${b.id}`);
     }
-  const descendants = (scopeId: string) =>
-    map.scopes
-      .filter(
-        (scope) => scope.id === scopeId || isDescendant(scope, scopeId, scopes),
-      )
-      .map((scope) => scope.id);
+  const ancestors = (scopeId: string) => {
+    const ids = new Set<string>();
+    let current = scopes.get(scopeId);
+    while (current && !ids.has(current.id)) {
+      ids.add(current.id);
+      current = current.parentId ? scopes.get(current.parentId) : undefined;
+    }
+    return ids;
+  };
   const maxActive = Math.max(
     0,
     ...map.scopes.map((scope) => {
-      const pathScopes = new Set(descendants(scope.id));
+      const pathScopes = ancestors(scope.id);
       return map.requirements.filter((item) => pathScopes.has(item.scopeId))
         .length;
     }),
@@ -300,17 +303,4 @@ function hasCycle(requirements: readonly AtomicRequirement[]): boolean {
     return false;
   };
   return requirements.some((item) => visit(item.id));
-}
-
-function isDescendant(
-  scope: InstructionScope,
-  ancestorId: string,
-  scopes: Map<string, InstructionScope>,
-): boolean {
-  let current: InstructionScope | undefined = scope;
-  while (current?.parentId) {
-    if (current.parentId === ancestorId) return true;
-    current = scopes.get(current.parentId);
-  }
-  return false;
 }

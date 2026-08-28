@@ -110,6 +110,7 @@ export type CompareArtifact = {
     readonly additions: number;
     readonly deletions: number;
     readonly changedLines: readonly number[];
+    readonly approximate: boolean;
   };
   readonly lint: {
     readonly before: Pick<LintArtifact, "score" | "grade" | "counts">;
@@ -434,7 +435,16 @@ function lineDiff(before: string, after: string) {
   const common = longestCommonSubsequence(left, right, {
     remaining: 8_000_000,
   });
-  if (common === null) return boundedLineChanges(left, right);
+  return common === null
+    ? patienceLineChanges(left, right)
+    : changesFromCommon(left, right, common);
+}
+
+function changesFromCommon(
+  left: readonly string[],
+  right: readonly string[],
+  common: readonly (readonly [number, number])[],
+) {
   const changedLines = new Set<number>();
   let additions = 0;
   let deletions = 0;
@@ -457,6 +467,7 @@ function lineDiff(before: string, after: string) {
     additions,
     deletions,
     changedLines: [...changedLines].sort((a, b) => a - b),
+    approximate: false,
   };
 }
 
@@ -550,7 +561,94 @@ function boundedLineChanges(left: readonly string[], right: readonly string[]) {
   );
   if (deletions > 0 && additions === 0)
     changedLines.push(Math.min(prefix + 1, Math.max(right.length, 1)));
-  return { additions, deletions, changedLines };
+  return { additions, deletions, changedLines, approximate: true };
+}
+
+function patienceLineChanges(
+  left: readonly string[],
+  right: readonly string[],
+) {
+  const anchors = patienceAnchors(left, right);
+  let leftStart = 0;
+  let rightStart = 0;
+  let additions = 0;
+  let deletions = 0;
+  let approximate = false;
+  const changedLines = new Set<number>();
+  for (const [leftAnchor, rightAnchor] of [
+    ...anchors,
+    [left.length, right.length] as const,
+  ]) {
+    const leftSegment = left.slice(leftStart, leftAnchor);
+    const rightSegment = right.slice(rightStart, rightAnchor);
+    const common = longestCommonSubsequence(leftSegment, rightSegment, {
+      remaining: 1_000_000,
+    });
+    const changes =
+      common === null
+        ? boundedLineChanges(leftSegment, rightSegment)
+        : changesFromCommon(leftSegment, rightSegment, common);
+    additions += changes.additions;
+    deletions += changes.deletions;
+    approximate ||= changes.approximate;
+    for (const line of changes.changedLines)
+      changedLines.add(rightStart + line);
+    leftStart = leftAnchor + 1;
+    rightStart = rightAnchor + 1;
+  }
+  return {
+    additions,
+    deletions,
+    changedLines: [...changedLines].sort((a, b) => a - b),
+    approximate,
+  };
+}
+
+function patienceAnchors(
+  left: readonly string[],
+  right: readonly string[],
+): readonly (readonly [number, number])[] {
+  const leftPositions = uniqueLinePositions(left);
+  const rightPositions = uniqueLinePositions(right);
+  const pairs = [...leftPositions]
+    .flatMap(([line, leftIndex]) => {
+      const rightIndex = rightPositions.get(line);
+      return rightIndex === undefined
+        ? []
+        : ([[leftIndex, rightIndex]] as const);
+    })
+    .sort((a, b) => a[0] - b[0]);
+  const tails: number[] = [];
+  const previous = Array<number>(pairs.length).fill(-1);
+  for (let index = 0; index < pairs.length; index += 1) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (pairs[tails[middle]!]![1] < pairs[index]![1]) low = middle + 1;
+      else high = middle;
+    }
+    if (low > 0) previous[index] = tails[low - 1]!;
+    tails[low] = index;
+  }
+  const anchors: (readonly [number, number])[] = [];
+  let current = tails.at(-1) ?? -1;
+  while (current >= 0) {
+    anchors.push(pairs[current]!);
+    current = previous[current]!;
+  }
+  return anchors.reverse();
+}
+
+function uniqueLinePositions(lines: readonly string[]): Map<string, number> {
+  const positions = new Map<string, number>();
+  const duplicates = new Set<string>();
+  lines.forEach((line, index) => {
+    if (positions.has(line)) duplicates.add(line);
+    else positions.set(line, index);
+  });
+  for (const line of duplicates) positions.delete(line);
+  return positions;
 }
 function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   if (!value || typeof value !== "object")
@@ -630,12 +728,25 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
     const validated = validateInput(skillMd, references);
     if (!validated.ok) return validated;
   }
+  const revisionsByNumber = new Map(
+    snapshot.revisions.map((revision) => [revision.revision, revision]),
+  );
   for (const evaluation of snapshot.evaluations) {
     const evaluationIssue = evaluationRecordError(evaluation);
     if (evaluationIssue)
       return err(
         "invalid_snapshot",
         `Snapshot contains an invalid evaluation record: ${evaluationIssue}`,
+      );
+    const revision = revisionsByNumber.get(evaluation.revision);
+    if (
+      evaluation.workspaceId !== snapshot.workspace.id ||
+      !revision ||
+      evaluation.contentHash !== revision.contentHash
+    )
+      return err(
+        "invalid_snapshot",
+        `Evaluation ${evaluation.id} is not linked to its claimed revision.`,
       );
     const dataIssue = evaluationDataError(evaluation.kind, evaluation.data);
     if (dataIssue)
@@ -651,6 +762,14 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         "invalid_snapshot",
         `Snapshot contains an invalid artifact record: ${issue}`,
       );
+    if (
+      artifact.workspaceId !== snapshot.workspace.id ||
+      !revisionsByNumber.has(artifact.revision)
+    )
+      return err(
+        "invalid_snapshot",
+        `Artifact ${artifact.id} is not linked to an imported revision.`,
+      );
   }
   for (const event of snapshot.auditEvents) {
     const issue = auditEventError(event);
@@ -658,6 +777,14 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       return err(
         "invalid_snapshot",
         `Snapshot contains an invalid audit event: ${issue}`,
+      );
+    if (
+      event.workspaceId !== snapshot.workspace.id ||
+      (event.revision !== undefined && !revisionsByNumber.has(event.revision))
+    )
+      return err(
+        "invalid_snapshot",
+        `Audit event ${event.id} is not linked to an imported revision.`,
       );
   }
   return ok(snapshot as WorkspaceSnapshot);

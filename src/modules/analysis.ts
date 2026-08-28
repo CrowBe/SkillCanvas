@@ -89,14 +89,17 @@ function descriptionSpan(
   return spanOf(raw, description) ?? frontmatterKeySpan(raw, "description");
 }
 
-function markdownHeadings(raw: string): readonly {
+function markdownHeadings(
+  raw: string,
+  baseOffset = 0,
+): readonly {
   level: number;
   title: string;
   sourceSpan: SourceSpan;
 }[] {
   const headings: { level: number; title: string; sourceSpan: SourceSpan }[] =
     [];
-  let offset = 0;
+  let offset = baseOffset;
   let fence: string | null = null;
   for (const line of raw.split("\n")) {
     if (fence === null) {
@@ -244,11 +247,19 @@ export function analyzeStructure(raw: string): StructureArtifact {
         },
         body: raw,
       };
+  const closing = parsed.ok ? raw.indexOf("\n---", 4) : -1;
+  const afterDelimiter = closing < 0 ? 0 : closing + 4;
+  const leadingNewlines =
+    raw.slice(afterDelimiter).match(/^(?:\r?\n)+/)?.[0].length ?? 0;
+  const bodyOffset = afterDelimiter + leadingNewlines;
   return {
     kind: "structure",
     rulesetVersion: RULESET_VERSION,
     title: source.frontmatter.name,
     description: source.frontmatter.description,
-    sections: markdownHeadings(raw),
+    sections: markdownHeadings(
+      parsed.ok ? raw.slice(bodyOffset) : raw,
+      parsed.ok ? bodyOffset : 0,
+    ),
   };
 }

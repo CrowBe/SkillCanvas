@@ -182,6 +182,115 @@ describe("WebMCP adapter", () => {
     expect(prepared.data.mockToolName).toBeNull();
     expect(prepared.data.evaluation.kind).toBe("test-run");
   });
+
+  it("rejects malformed declared inputs as invalid submissions", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    let current: string | null = null;
+    const handlers = createToolHandlers({
+      service,
+      appearance: appearance(),
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
+    });
+    const badOpen = await execute(
+      handlers.find((item) => item.name === "skill_open")!,
+      {
+        name: {},
+        skillMd:
+          "---\nname: demo-skill\ndescription: Use when a deterministic demo is requested.\n---\n\n# Demo\n\nFollow the workflow carefully.",
+      },
+    );
+    expect(badOpen.error.code).toBe("invalid_submission");
+    expect(await service.list()).toEqual([]);
+    await execute(
+      handlers.find((item) => item.name === "skill_open")!,
+      {},
+    );
+    const badAnalyze = await execute(
+      handlers.find((item) => item.name === "skill_analyze")!,
+      { capabilities: 42 },
+    );
+    expect(badAnalyze.error.code).toBe("invalid_submission");
+  });
+
+  it("imports a workspace snapshot through the tool surface", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create();
+    if (!created.ok) throw new Error(created.error.message);
+    const exported = await source.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const target = createWorkspaceService(new MemoryWorkspaceStore());
+    let current: string | null = null;
+    const handlers = createToolHandlers({
+      service: target,
+      appearance: appearance(),
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
+    });
+    const imported = await execute(
+      handlers.find((item) => item.name === "workspace_snapshot_import")!,
+      { json: exported.value },
+    );
+    expect(imported.ok).toBe(true);
+    expect(current).toBe(created.value.workspace.id);
+  });
+
+  it("guards failures from run-scoped mock tools", async () => {
+    const registered: WebMcpTool[] = [];
+    const context = {
+      async registerTool(tool: WebMcpTool) {
+        registered.push(tool);
+        return undefined;
+      },
+    };
+    const baseService = createWorkspaceService(new MemoryWorkspaceStore());
+    let current: string | null = null;
+    const registration = await registerWebMcpTools(context, {
+      service: {
+        ...baseService,
+        invokeMock: async () => {
+          throw new Error("mock persistence failed");
+        },
+      },
+      appearance: appearance(),
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
+    });
+    await execute(
+      registration.tools.find((item) => item.name === "skill_open")!,
+      {},
+    );
+    const prepared = await execute(
+      registration.tools.find((item) => item.name === "evaluation_prepare")!,
+      {
+        kind: "test-run",
+        contract: {
+          name: "read_demo",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object" },
+        },
+      },
+    );
+    const mock = registered.find(
+      (tool) => tool.name === prepared.data.mockToolName,
+    )!;
+    const result = await execute(mock, {});
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.message).toContain("mock persistence failed");
+  });
 });
 
 describe("WebMCP registration failures", () => {

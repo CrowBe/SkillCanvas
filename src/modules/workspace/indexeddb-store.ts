@@ -128,17 +128,6 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     ]);
   }
 
-  private async stageMemory(): Promise<MemoryWorkspaceStore> {
-    const staged = new MemoryWorkspaceStore();
-    for (const workspace of await this.memory.listWorkspaces()) {
-      const snapshot = await this.memory.exportSnapshot(workspace.id);
-      if ("code" in snapshot) throw new Error(snapshot.message);
-      const imported = await staged.importSnapshot(snapshot);
-      if ("code" in imported) throw new Error(imported.message);
-    }
-    return staged;
-  }
-
   private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.mutationQueue.then(operation, operation);
     this.mutationQueue = result.then(
@@ -149,18 +138,31 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   }
 
   private async commitMutation<T>(
-    operation: (staged: MemoryWorkspaceStore) => Promise<T>,
+    operation: (memory: MemoryWorkspaceStore) => Promise<T>,
     workspaceId: (result: T) => string | undefined,
+    targetWorkspaceId?: string,
   ): Promise<T> {
     return this.enqueueMutation(async () => {
-      const staged = await this.stageMemory();
-      const result = await operation(staged);
-      const id = workspaceId(result);
-      if (id !== undefined) {
-        await this.persist(staged, id);
-        this.memory = staged;
+      const previous = targetWorkspaceId
+        ? await this.memory.exportSnapshot(targetWorkspaceId)
+        : undefined;
+      let mutatedWorkspaceId = targetWorkspaceId;
+      try {
+        const result = await operation(this.memory);
+        const id = workspaceId(result);
+        if (id !== undefined) {
+          mutatedWorkspaceId = id;
+          await this.persist(this.memory, id);
+        }
+        return result;
+      } catch (error) {
+        if (mutatedWorkspaceId)
+          await this.memory.restoreWorkspace(
+            mutatedWorkspaceId,
+            previous && !("code" in previous) ? previous : undefined,
+          );
+        throw error;
       }
-      return result;
     });
   }
 
@@ -186,6 +188,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     return this.commitMutation(
       (staged) => staged.appendRevision(input),
       (result) => ("code" in result ? undefined : input.workspaceId),
+      input.workspaceId,
     );
   }
   async putArtifact(artifact: ArtifactRecord) {
@@ -195,6 +198,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         await staged.putArtifact(artifact);
       },
       () => artifact.workspaceId,
+      artifact.workspaceId,
     );
   }
   async recordEvaluationEvidence(evaluation: EvaluationRecord) {
@@ -204,6 +208,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         await staged.recordEvaluationEvidence(evaluation);
       },
       () => evaluation.workspaceId,
+      evaluation.workspaceId,
     );
   }
   async appendAuditEvent(event: AuditEvent) {
@@ -213,6 +218,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         await staged.appendAuditEvent(event);
       },
       () => event.workspaceId,
+      event.workspaceId,
     );
   }
   async exportSnapshot(
@@ -226,6 +232,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     return this.commitMutation(
       (staged) => staged.importSnapshot(snapshot),
       (result) => ("code" in result ? undefined : result.workspace.id),
+      snapshot.workspace.id,
     );
   }
 }

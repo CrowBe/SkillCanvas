@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IDBPDatabase } from "idb";
 import { EMPTY_SKILL } from "../skill";
 import { IndexedDbWorkspaceStore } from "./indexeddb-store";
@@ -57,5 +57,29 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       actor: "human",
     });
     expect("code" in retried ? undefined : retried.revision.revision).toBe(2);
+  });
+
+  it("hashes only the workspace targeted by a mutation", async () => {
+    const control = databaseControl();
+    const store = new IndexedDbWorkspaceStore(control.database);
+    const first = await store.createWorkspace({
+      name: "first",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    await store.createWorkspace({
+      name: "second",
+      skillMd: `${EMPTY_SKILL}\nSecond workspace.`,
+      referenceFiles: [],
+    });
+    const digest = vi.spyOn(crypto.subtle, "digest");
+    await store.appendRevision({
+      workspaceId: first.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nUpdated first workspace.`,
+      actor: "human",
+    });
+    expect(digest).toHaveBeenCalledTimes(1);
+    digest.mockRestore();
   });
 });

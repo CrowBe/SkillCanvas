@@ -55,6 +55,14 @@ function snapshotRecordError<T extends { id: string; workspaceId: string }>(
   return null;
 }
 
+function deleteWorkspaceRecords<T extends { workspaceId: string }>(
+  records: Map<string, T>,
+  workspaceId: string,
+): void {
+  for (const [id, record] of records)
+    if (record.workspaceId === workspaceId) records.delete(id);
+}
+
 export class MemoryWorkspaceStore implements WorkspaceStore {
   protected readonly state: State = {
     workspaces: new Map(),
@@ -326,6 +334,31 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
         (revision) => revision.revision === snapshot.workspace.currentRevision,
       )!,
     );
+  }
+
+  async restoreWorkspace(
+    workspaceId: string,
+    snapshot?: WorkspaceSnapshot,
+  ): Promise<void> {
+    this.state.workspaces.delete(workspaceId);
+    this.state.revisions.delete(workspaceId);
+    deleteWorkspaceRecords(this.state.artifacts, workspaceId);
+    deleteWorkspaceRecords(this.state.evaluations, workspaceId);
+    deleteWorkspaceRecords(this.state.auditEvents, workspaceId);
+    const referencedHashes = new Set(
+      [...this.state.revisions.values()].flatMap((revisions) =>
+        revisions.flatMap((revision) => [
+          revision.contentHash,
+          ...revision.references.map((reference) => reference.contentHash),
+        ]),
+      ),
+    );
+    for (const hash of this.state.blobs.keys())
+      if (!referencedHashes.has(hash)) this.state.blobs.delete(hash);
+    if (snapshot) {
+      const restored = await this.importSnapshot(snapshot);
+      if ("code" in restored) throw new Error(restored.message);
+    }
   }
 
   protected async putBlob(content: string): Promise<string> {

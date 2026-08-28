@@ -78,6 +78,32 @@ describe("instruction-load vector", () => {
     };
     expect(validateInstructionMap(map, raw, 1).ok).toBe(false);
   });
+
+  it("counts maximum active requirements along one scope path", () => {
+    const requirement = (id: string, scopeId: string, start: number) => ({
+      id,
+      sourceSpan: { start, end: start + 3 },
+      statement: raw.slice(start, start + 3),
+      kind: "action" as const,
+      scopeId,
+      dependencies: [],
+      verifiability: "deterministic" as const,
+    });
+    const map: InstructionMap = {
+      ...base,
+      scopes: [
+        { id: "root", label: "Root" },
+        { id: "left", parentId: "root", label: "Left" },
+        { id: "right", parentId: "root", label: "Right" },
+      ],
+      requirements: [
+        requirement("root-r", "root", 0),
+        requirement("left-r", "left", 4),
+        requirement("right-r", "right", 8),
+      ],
+    };
+    expect(instructionLoadVector(map).maximumSimultaneouslyActive).toBe(2);
+  });
 });
 
 describe("instruction map validation", () => {
