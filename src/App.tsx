@@ -404,8 +404,13 @@ export function App({
     }
     let result;
     if (inspection.value.collision) {
+      const existingName = inspection.value.existingWorkspace?.name;
+      if (!existingName) {
+        setStatus("Snapshot collision changed; import it again to continue.");
+        return;
+      }
       const confirmed = window.confirm(
-        `Replace saved workspace “${inspection.value.workspace.name}”? This will permanently replace its local revisions and evidence with the imported snapshot.`,
+        `Replace saved workspace “${existingName}” with incoming snapshot “${inspection.value.incomingWorkspace.name}”? This will permanently replace the saved workspace's local revisions and evidence.`,
       );
       if (!confirmed) {
         setStatus("Snapshot import cancelled; the saved workspace was unchanged.");

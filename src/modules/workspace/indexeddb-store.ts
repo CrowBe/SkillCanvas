@@ -5,6 +5,7 @@ import type {
   ArtifactRecord,
   AuditEvent,
   EvaluationRecord,
+  SkillRevision,
   WorkspaceBundle,
   WorkspaceSnapshot,
   WorkspaceStore,
@@ -105,6 +106,9 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     if ("code" in snapshot) throw new Error(snapshot.message);
     const db = await this.db();
     const transaction = db.transaction([...STORES], "readwrite");
+    const persistedRevisions = (await transaction
+      .objectStore("revisions")
+      .getAll()) as (SkillRevision & { key: string })[];
     const currentHashes = new Set(snapshot.blobs.map((blob) => blob.hash));
     const staleHashes =
       previous?.blobs
@@ -112,7 +116,14 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         .filter(
           (hash) =>
             !currentHashes.has(hash) &&
-            !this.memory.referencesBlobOutsideWorkspace(hash, workspaceId),
+            !persistedRevisions.some(
+              (revision) =>
+                revision.workspaceId !== workspaceId &&
+                (revision.contentHash === hash ||
+                  revision.references.some(
+                    (reference) => reference.contentHash === hash,
+                  )),
+            ),
         ) ?? [];
     await Promise.all([
       ...(previous?.revisions.map((revision) =>
@@ -260,10 +271,14 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     options: { replaceExisting?: boolean } = {},
   ) {
     await this.hydrate();
-    const validation = await this.memory.validateSnapshot(snapshot, options);
-    if (validation) return validation;
     return this.commitMutation(
-      async (staged) => staged.loadValidatedSnapshot(snapshot, options),
+      async (staged) => {
+        const validation = await this.memory.validateSnapshot(
+          snapshot,
+          options,
+        );
+        return validation ?? staged.loadValidatedSnapshot(snapshot, options);
+      },
       (result) => ("code" in result ? undefined : result.workspace.id),
       snapshot.workspace.id,
     );

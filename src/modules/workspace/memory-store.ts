@@ -336,20 +336,6 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     return null;
   }
 
-  referencesBlobOutsideWorkspace(hash: string, workspaceId: string): boolean {
-    return [...this.state.revisions.entries()].some(
-      ([id, revisions]) =>
-        id !== workspaceId &&
-        revisions.some(
-          (revision) =>
-            revision.contentHash === hash ||
-            revision.references.some(
-              (reference) => reference.contentHash === hash,
-            ),
-        ),
-    );
-  }
-
   loadValidatedSnapshot(
     snapshot: WorkspaceSnapshot,
     options: { replaceExisting?: boolean } = {},

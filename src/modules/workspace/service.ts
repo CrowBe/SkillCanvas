@@ -102,7 +102,11 @@ export interface WorkspaceService {
   exportSkill(workspaceId: string): Promise<Result<Uint8Array>>;
   exportSnapshot(workspaceId: string): Promise<Result<string>>;
   inspectSnapshotImport(json: string): Promise<
-    Result<{ workspace: WorkspaceRecord; collision: boolean }>
+    Result<{
+      incomingWorkspace: WorkspaceRecord;
+      existingWorkspace?: WorkspaceRecord;
+      collision: boolean;
+    }>
   >;
   importSnapshot(json: string): Promise<Result<WorkspaceBundle>>;
   replaceSnapshot(json: string): Promise<Result<WorkspaceBundle>>;
@@ -353,11 +357,13 @@ export function createWorkspaceService(
       const decoded = decodeSnapshot(json);
       if (!decoded.ok) return decoded;
       const workspaces = await store.listWorkspaces();
+      const existingWorkspace = workspaces.find(
+        (workspace) => workspace.id === decoded.value.workspace.id,
+      );
       return ok({
-        workspace: decoded.value.workspace,
-        collision: workspaces.some(
-          (workspace) => workspace.id === decoded.value.workspace.id,
-        ),
+        incomingWorkspace: decoded.value.workspace,
+        ...(existingWorkspace ? { existingWorkspace } : {}),
+        collision: existingWorkspace !== undefined,
       });
     },
     async importSnapshot(json) {

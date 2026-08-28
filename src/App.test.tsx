@@ -100,6 +100,9 @@ describe("App WebMCP registration lifecycle", () => {
       created.value.workspace.id,
     );
     if (!exported.ok) throw new Error(exported.error.message);
+    const incoming = JSON.parse(exported.value);
+    incoming.workspace.name = "Incoming Snapshot";
+    const incomingJson = JSON.stringify(incoming);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const { App } = await import("./App");
     render(<App workspaceService={workspaceService} />);
@@ -107,7 +110,7 @@ describe("App WebMCP registration lifecycle", () => {
       new File([exported.value], "workspace.json", {
         type: "application/json",
       }),
-      { text: async () => exported.value },
+      { text: async () => incomingJson },
     );
     fireEvent.change(screen.getByLabelText("Import workbench snapshot"), {
       target: { files: [file] },
@@ -115,7 +118,11 @@ describe("App WebMCP registration lifecycle", () => {
     expect(
       await screen.findByText(/Snapshot import cancelled/),
     ).toBeInTheDocument();
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("permanently"));
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /Replace saved workspace “Saved Workspace” with incoming snapshot “Incoming Snapshot”.*permanently/,
+      ),
+    );
     expect(await workspaceService.list()).toHaveLength(1);
     confirm.mockRestore();
   });
