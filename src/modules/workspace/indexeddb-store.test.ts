@@ -12,6 +12,9 @@ function databaseControl() {
         put: async () => {
           if (failWrites) throw new Error("persistence failed");
         },
+        delete: async () => {
+          if (failWrites) throw new Error("persistence failed");
+        },
       }),
       done: Promise.resolve(),
     }),
@@ -81,5 +84,30 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     });
     expect(digest).toHaveBeenCalledTimes(1);
     digest.mockRestore();
+  });
+
+  it("replaces an existing workspace with an earlier snapshot", async () => {
+    const control = databaseControl();
+    const store = new IndexedDbWorkspaceStore(control.database);
+    const created = await store.createWorkspace({
+      name: "restorable",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    const snapshot = await store.exportSnapshot(created.workspace.id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    const updated = await store.appendRevision({
+      workspaceId: created.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nLater revision.`,
+      actor: "human",
+    });
+    if ("code" in updated) throw new Error(updated.message);
+    const restored = await store.importSnapshot(snapshot);
+    if ("code" in restored) throw new Error(restored.message);
+    expect(restored.revision.revision).toBe(1);
+    expect("code" in (await store.openWorkspace(created.workspace.id, 2))).toBe(
+      true,
+    );
   });
 });

@@ -263,6 +263,8 @@ export function invokeMockTool(
 ): Result<{ record: EvaluationRecord; output: unknown }> {
   if (record.kind !== "test-run")
     return err("invalid_submission", "Evaluation is not a test run.");
+  if (record.status === "complete")
+    return err("evaluation_complete", "Evaluation is already complete.");
   const data = record.data as TestRunData;
   const output = data.scenario.seedData;
   const at = new Date().toISOString();
@@ -288,6 +290,8 @@ export function submitTestRun(
 ): Result<EvaluationRecord> {
   if (record.kind !== "test-run")
     return err("invalid_submission", "Evaluation is not a test run.");
+  if (record.status === "complete")
+    return err("evaluation_complete", "Evaluation is already complete.");
   const data = record.data as TestRunData;
   const calls = data.transcript.filter(
     (step): step is Extract<TranscriptStep, { kind: "tool-call" }> =>

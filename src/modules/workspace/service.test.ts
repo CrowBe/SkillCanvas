@@ -117,6 +117,27 @@ describe("WorkspaceService", () => {
     expect(malformed.ok).toBe(false);
     if (!malformed.ok) expect(malformed.error.code).toBe("invalid_snapshot");
   });
+
+  it("restores an earlier snapshot over the same workspace", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const updated = await service.update({
+      workspaceId: created.value.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nLater revision.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const restored = await service.importSnapshot(exported.value);
+    expect(restored.ok).toBe(true);
+    if (!restored.ok) return;
+    expect(restored.value.revision.revision).toBe(1);
+    expect(restored.value.skillMd).toBe(EMPTY_SKILL);
+    expect(await service.list()).toHaveLength(1);
+  });
 });
 
 describe("WorkspaceService input validation", () => {
@@ -493,6 +514,51 @@ describe("snapshot import evaluation data guards", () => {
     for (const mutate of [
       (snapshot: any) => snapshot.artifacts.push(null),
       (snapshot: any) => snapshot.auditEvents.push(null),
+    ]) {
+      const json = await snapshotWith(mutate);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(json);
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
+  it("rejects malformed workspace, revision, and artifact payloads", async () => {
+    for (const mutate of [
+      (snapshot: any) => {
+        snapshot.workspace.updatedAt = 0;
+      },
+      (snapshot: any) => {
+        snapshot.revisions[0].timestamp = null;
+      },
+      (snapshot: any) => {
+        snapshot.artifacts[0].data = {};
+      },
+    ]) {
+      const json = await snapshotWith(mutate);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(json);
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
+  it("rejects evaluation statuses inconsistent with their evidence", async () => {
+    for (const mutate of [
+      (snapshot: any) => {
+        const triggering = snapshot.evaluations.find(
+          (item: any) => item.kind === "triggering",
+        );
+        triggering.status = "complete";
+      },
+      (snapshot: any) => {
+        const testRun = snapshot.evaluations.find(
+          (item: any) => item.kind === "test-run",
+        );
+        testRun.status = "complete";
+      },
     ]) {
       const json = await snapshotWith(mutate);
       const imported = await createWorkspaceService(

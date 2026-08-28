@@ -247,15 +247,23 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
   async importSnapshot(
     snapshot: WorkspaceSnapshot,
   ): Promise<WorkspaceBundle | DomainError> {
+    const existing = await this.exportSnapshot(snapshot.workspace.id);
+    if (!("code" in existing)) this.removeWorkspace(snapshot.workspace.id);
+    const imported = await this.admitSnapshot(snapshot);
+    if ("code" in imported && !("code" in existing)) {
+      const restored = await this.admitSnapshot(existing);
+      if ("code" in restored) throw new Error(restored.message);
+    }
+    return imported;
+  }
+
+  private async admitSnapshot(
+    snapshot: WorkspaceSnapshot,
+  ): Promise<WorkspaceBundle | DomainError> {
     if (snapshot.snapshotVersion !== 1 || snapshot.revisions.length === 0)
       return domainError(
         "invalid_snapshot",
         "Unsupported or empty workspace snapshot.",
-      );
-    if (this.state.workspaces.has(snapshot.workspace.id))
-      return domainError(
-        "invalid_snapshot",
-        "A workspace with this id already exists.",
       );
     for (const blob of snapshot.blobs)
       if (
@@ -340,6 +348,14 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     workspaceId: string,
     snapshot?: WorkspaceSnapshot,
   ): Promise<void> {
+    this.removeWorkspace(workspaceId);
+    if (snapshot) {
+      const restored = await this.importSnapshot(snapshot);
+      if ("code" in restored) throw new Error(restored.message);
+    }
+  }
+
+  private removeWorkspace(workspaceId: string): void {
     this.state.workspaces.delete(workspaceId);
     this.state.revisions.delete(workspaceId);
     deleteWorkspaceRecords(this.state.artifacts, workspaceId);
@@ -355,10 +371,6 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     );
     for (const hash of this.state.blobs.keys())
       if (!referencedHashes.has(hash)) this.state.blobs.delete(hash);
-    if (snapshot) {
-      const restored = await this.importSnapshot(snapshot);
-      if ("code" in restored) throw new Error(restored.message);
-    }
   }
 
   protected async putBlob(content: string): Promise<string> {

@@ -81,6 +81,24 @@ describe("evaluation protocols", () => {
       validateSchema({ action: "create" }, { enum: [{ action: "create" }] }),
     ).toEqual([]);
   });
+
+  it("keeps completed test runs terminal", async () => {
+    const run = prepareTestRun(await bundle(), {
+      name: "read_items",
+      description: "Read items",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+    });
+    const completed = submitTestRun(run, {});
+    if (!completed.ok) throw new Error(completed.error.message);
+    for (const result of [
+      invokeMockTool(completed.value, {}),
+      submitTestRun(completed.value, {}),
+    ]) {
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("evaluation_complete");
+    }
+  });
 });
 
 describe("triggering candidate derivation", () => {

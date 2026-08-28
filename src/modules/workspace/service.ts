@@ -8,6 +8,7 @@ import {
 import {
   instructionLoadVector,
   validateInstructionMap,
+  type InstructionLoadVector,
   type InstructionMap,
 } from "../instruction-map";
 import {
@@ -39,6 +40,7 @@ import type {
   EvaluationKind,
   EvaluationRecord,
   WorkspaceBundle,
+  WorkspaceRecord,
   WorkspaceSnapshot,
   WorkspaceStore,
 } from "./types";
@@ -656,8 +658,8 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   const snapshot = value as Partial<WorkspaceSnapshot>;
   if (
     snapshot.snapshotVersion !== 1 ||
-    !snapshot.workspace ||
-    typeof snapshot.workspace.id !== "string" ||
+    typeof snapshot.exportedAt !== "string" ||
+    workspaceRecordError(snapshot.workspace) !== null ||
     !Array.isArray(snapshot.revisions) ||
     !Array.isArray(snapshot.blobs) ||
     !Array.isArray(snapshot.artifacts) ||
@@ -665,6 +667,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
     !Array.isArray(snapshot.auditEvents)
   )
     return err("invalid_snapshot", "Snapshot shape or version is invalid.");
+  const workspace = snapshot.workspace as WorkspaceRecord;
   if (
     snapshot.revisions.length > 1000 ||
     snapshot.blobs.length > 1025 ||
@@ -680,9 +683,14 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   for (const blob of snapshot.blobs) {
     if (
       !blob ||
+      typeof blob !== "object" ||
       typeof blob.hash !== "string" ||
       typeof blob.content !== "string" ||
-      typeof blob.bytes !== "number"
+      typeof blob.bytes !== "number" ||
+      !Number.isInteger(blob.bytes) ||
+      blob.bytes < 0 ||
+      byteLength(blob.content) !== blob.bytes ||
+      blobs.has(blob.hash)
     )
       return err(
         "invalid_snapshot",
@@ -691,12 +699,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
     blobs.set(blob.hash, blob.content);
   }
   for (const revision of snapshot.revisions) {
-    if (
-      !revision ||
-      typeof revision.contentHash !== "string" ||
-      !Number.isInteger(revision.revision) ||
-      !Array.isArray(revision.references)
-    )
+    if (revisionRecordError(revision))
       return err(
         "invalid_snapshot",
         "Snapshot contains an invalid revision record.",
@@ -709,16 +712,8 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       );
     const references: { path: string; content: string }[] = [];
     for (const reference of revision.references) {
-      const content =
-        reference && typeof reference === "object"
-          ? blobs.get(reference.contentHash)
-          : undefined;
-      if (
-        !reference ||
-        typeof reference !== "object" ||
-        typeof reference.path !== "string" ||
-        content === undefined
-      )
+      const content = blobs.get(reference.contentHash);
+      if (content === undefined || byteLength(content) !== reference.bytes)
         return err(
           "invalid_snapshot",
           `Revision ${revision.revision} has an invalid reference pointer.`,
@@ -726,7 +721,11 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       references.push({ path: reference.path, content });
     }
     const validated = validateInput(skillMd, references);
-    if (!validated.ok) return validated;
+    if (!validated.ok)
+      return err(
+        "invalid_snapshot",
+        `Revision ${revision.revision} contains invalid Skill content: ${validated.error.message}`,
+      );
   }
   const revisionsByNumber = new Map(
     snapshot.revisions.map((revision) => [revision.revision, revision]),
@@ -740,7 +739,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       );
     const revision = revisionsByNumber.get(evaluation.revision);
     if (
-      evaluation.workspaceId !== snapshot.workspace.id ||
+      evaluation.workspaceId !== workspace.id ||
       !revision ||
       evaluation.contentHash !== revision.contentHash
     )
@@ -754,6 +753,16 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         "invalid_snapshot",
         `Evaluation ${evaluation.id} has invalid data: ${dataIssue}`,
       );
+    const statusIssue = evaluationStatusError(
+      evaluation.status,
+      evaluation.kind,
+      evaluation.data as Record<string, unknown>,
+    );
+    if (statusIssue)
+      return err(
+        "invalid_snapshot",
+        `Evaluation ${evaluation.id} has inconsistent status: ${statusIssue}`,
+      );
   }
   for (const artifact of snapshot.artifacts) {
     const issue = artifactRecordError(artifact);
@@ -763,12 +772,23 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         `Snapshot contains an invalid artifact record: ${issue}`,
       );
     if (
-      artifact.workspaceId !== snapshot.workspace.id ||
+      artifact.workspaceId !== workspace.id ||
       !revisionsByNumber.has(artifact.revision)
     )
       return err(
         "invalid_snapshot",
         `Artifact ${artifact.id} is not linked to an imported revision.`,
+      );
+    const artifactIssue = artifactDataError(
+      artifact.kind,
+      artifact.data,
+      blobs.get(revisionsByNumber.get(artifact.revision)!.contentHash)!,
+      artifact.revision,
+    );
+    if (artifactIssue)
+      return err(
+        "invalid_snapshot",
+        `Artifact ${artifact.id} has invalid data: ${artifactIssue}`,
       );
   }
   for (const event of snapshot.auditEvents) {
@@ -779,7 +799,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         `Snapshot contains an invalid audit event: ${issue}`,
       );
     if (
-      event.workspaceId !== snapshot.workspace.id ||
+      event.workspaceId !== workspace.id ||
       (event.revision !== undefined && !revisionsByNumber.has(event.revision))
     )
       return err(
@@ -921,6 +941,44 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
   return "unsupported evaluation kind.";
 }
 
+function evaluationStatusError(
+  status: EvaluationRecord["status"],
+  kind: EvaluationRecord["kind"],
+  data: Record<string, unknown>,
+): string | null {
+  if (kind === "triggering") {
+    const cases = data.cases as unknown[];
+    const observations = data.observations as unknown[];
+    if (cases.length === 0) return "triggering evaluations require cases.";
+    if (status === "prepared" && observations.length !== 0)
+      return "prepared triggering evaluations cannot contain observations.";
+    if (
+      status === "in-progress" &&
+      (observations.length === 0 || observations.length >= cases.length)
+    )
+      return "in-progress triggering evaluations require partial observations.";
+    if (status === "complete" && observations.length !== cases.length)
+      return "complete triggering evaluations require all observations.";
+    return null;
+  }
+  const transcript = data.transcript as unknown[];
+  const hasFinalOutput = "finalOutput" in data;
+  const hasChecks = "checks" in data;
+  if (
+    status === "prepared" &&
+    (transcript.length !== 0 || hasFinalOutput || hasChecks)
+  )
+    return "prepared test runs cannot contain execution evidence.";
+  if (
+    status === "in-progress" &&
+    (transcript.length === 0 || hasFinalOutput || hasChecks)
+  )
+    return "in-progress test runs require transcript evidence only.";
+  if (status === "complete" && (!hasFinalOutput || !hasChecks))
+    return "complete test runs require final output and checks.";
+  return null;
+}
+
 function evaluationRecordError(value: unknown): string | null {
   if (!isSchemaObject(value)) return "record must be an object.";
   if (
@@ -930,11 +988,187 @@ function evaluationRecordError(value: unknown): string | null {
     typeof value.contentHash !== "string" ||
     typeof value.kind !== "string" ||
     !["prepared", "in-progress", "complete"].includes(value.status as string) ||
-    !isSchemaObject(value.versions) ||
+    !isStringRecord(value.versions) ||
     typeof value.createdAt !== "string" ||
     typeof value.updatedAt !== "string"
   )
     return "required metadata is missing.";
+  return null;
+}
+
+function workspaceRecordError(value: unknown): string | null {
+  if (!isSchemaObject(value)) return "workspace must be an object.";
+  if (
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    !Number.isInteger(value.currentRevision) ||
+    typeof value.createdAt !== "string" ||
+    typeof value.updatedAt !== "string" ||
+    typeof value.ephemeral !== "boolean"
+  )
+    return "workspace metadata is incomplete.";
+  return null;
+}
+
+function revisionRecordError(value: unknown): string | null {
+  if (!isSchemaObject(value)) return "revision must be an object.";
+  if (
+    typeof value.workspaceId !== "string" ||
+    !Number.isInteger(value.revision) ||
+    (value.parentRevision !== null &&
+      !Number.isInteger(value.parentRevision)) ||
+    typeof value.contentHash !== "string" ||
+    !Array.isArray(value.references) ||
+    typeof value.timestamp !== "string" ||
+    typeof value.rulesetVersion !== "string"
+  )
+    return "revision metadata is incomplete.";
+  for (const reference of value.references)
+    if (
+      !isSchemaObject(reference) ||
+      typeof reference.path !== "string" ||
+      typeof reference.contentHash !== "string" ||
+      typeof reference.bytes !== "number" ||
+      !Number.isInteger(reference.bytes) ||
+      reference.bytes < 0
+    )
+      return "revision reference metadata is incomplete.";
+  return null;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    isSchemaObject(value) &&
+    Object.values(value).every((item) => typeof item === "string")
+  );
+}
+
+function sourceSpanError(value: unknown): string | null {
+  if (
+    !isSchemaObject(value) ||
+    !Number.isInteger(value.start) ||
+    !Number.isInteger(value.end) ||
+    (value.start as number) < 0 ||
+    (value.end as number) <= (value.start as number)
+  )
+    return "source span is invalid.";
+  return null;
+}
+
+function lintSummaryError(value: unknown): string | null {
+  if (!isSchemaObject(value)) return "lint summary is invalid.";
+  const counts = value.counts;
+  if (
+    typeof value.score !== "number" ||
+    !["A", "B", "C", "D"].includes(value.grade as string) ||
+    !isSchemaObject(counts) ||
+    !["error", "warn", "info"].every(
+      (severity) => typeof counts[severity] === "number",
+    )
+  )
+    return "lint summary is invalid.";
+  return null;
+}
+
+function artifactDataError(
+  kind: ArtifactRecord["kind"],
+  data: unknown,
+  skillMd: string,
+  revision: number,
+): string | null {
+  if (!isSchemaObject(data)) return "artifact data must be an object.";
+  if (kind === "instruction-map") {
+    if (data.suppliedBy !== "visiting-agent proposal")
+      return "instruction map has an invalid supplier.";
+    const checked = validateInstructionMap(data, skillMd, revision);
+    return checked.ok ? null : checked.error.message;
+  }
+  if (kind === "instruction-load") {
+    const keys: readonly (keyof InstructionLoadVector)[] = [
+      "totalAtomicRequirements",
+      "maximumSimultaneouslyActive",
+      "longestDependencyChain",
+      "maximumScopeDepth",
+      "branchCount",
+      "crossScopeReferences",
+      "conflicts",
+      "duplicates",
+      "deterministicallyVerifiableFraction",
+    ];
+    return keys.every(
+      (key) => typeof data[key] === "number" && Number.isFinite(data[key]),
+    )
+      ? null
+      : "instruction-load metrics must be numeric.";
+  }
+  if (kind === "lint") {
+    if (
+      data.kind !== "lint" ||
+      typeof data.rulesetVersion !== "string" ||
+      lintSummaryError(data) !== null ||
+      !Array.isArray(data.findings)
+    )
+      return "lint artifact fields are incomplete.";
+    for (const finding of data.findings)
+      if (
+        !isSchemaObject(finding) ||
+        typeof finding.rule !== "string" ||
+        !["error", "warn", "info"].includes(finding.severity as string) ||
+        typeof finding.message !== "string" ||
+        (finding.sourceSpan !== undefined &&
+          sourceSpanError(finding.sourceSpan) !== null)
+      )
+        return "lint finding is invalid.";
+    return null;
+  }
+  if (kind === "structure") {
+    if (
+      data.kind !== "structure" ||
+      typeof data.rulesetVersion !== "string" ||
+      typeof data.title !== "string" ||
+      typeof data.description !== "string" ||
+      !Array.isArray(data.sections)
+    )
+      return "structure artifact fields are incomplete.";
+    for (const section of data.sections)
+      if (
+        !isSchemaObject(section) ||
+        !Number.isInteger(section.level) ||
+        typeof section.title !== "string" ||
+        sourceSpanError(section.sourceSpan) !== null
+      )
+        return "structure section is invalid.";
+    return null;
+  }
+  if (
+    data.kind !== "compare" ||
+    !Number.isInteger(data.beforeRevision) ||
+    !Number.isInteger(data.afterRevision) ||
+    !isSchemaObject(data.source) ||
+    typeof data.source.additions !== "number" ||
+    typeof data.source.deletions !== "number" ||
+    !Array.isArray(data.source.changedLines) ||
+    data.source.changedLines.some((line) => !Number.isInteger(line)) ||
+    typeof data.source.approximate !== "boolean" ||
+    !isSchemaObject(data.lint) ||
+    lintSummaryError(data.lint.before) !== null ||
+    lintSummaryError(data.lint.after) !== null ||
+    !Array.isArray(data.evaluationReferences)
+  )
+    return "compare artifact fields are incomplete.";
+  for (const reference of data.evaluationReferences)
+    if (
+      !isSchemaObject(reference) ||
+      typeof reference.id !== "string" ||
+      !["triggering", "test-run", "capacity-probe"].includes(
+        reference.kind as string,
+      ) ||
+      !Number.isInteger(reference.revision) ||
+      !["prepared", "in-progress", "complete"].includes(
+        reference.status as string,
+      )
+    )
+      return "compare evaluation reference is invalid.";
   return null;
 }
 

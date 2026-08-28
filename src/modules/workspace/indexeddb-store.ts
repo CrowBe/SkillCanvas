@@ -99,12 +99,27 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   private async persist(
     memory: MemoryWorkspaceStore,
     workspaceId: string,
+    previous?: WorkspaceSnapshot,
   ): Promise<void> {
     const snapshot = await memory.exportSnapshot(workspaceId);
     if ("code" in snapshot) throw new Error(snapshot.message);
     const db = await this.db();
     const transaction = db.transaction([...STORES], "readwrite");
     await Promise.all([
+      ...(previous?.revisions.map((revision) =>
+        transaction
+          .objectStore("revisions")
+          .delete(`${revision.workspaceId}:${revision.revision}`),
+      ) ?? []),
+      ...(previous?.artifacts.map((artifact) =>
+        transaction.objectStore("artifacts").delete(artifact.id),
+      ) ?? []),
+      ...(previous?.evaluations.map((evaluation) =>
+        transaction.objectStore("evaluations").delete(evaluation.id),
+      ) ?? []),
+      ...(previous?.auditEvents.map((event) =>
+        transaction.objectStore("auditEvents").delete(event.id),
+      ) ?? []),
       transaction.objectStore("workspaces").put(snapshot.workspace),
       ...snapshot.revisions.map((revision) =>
         transaction.objectStore("revisions").put({
@@ -152,7 +167,11 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         const id = workspaceId(result);
         if (id !== undefined) {
           mutatedWorkspaceId = id;
-          await this.persist(this.memory, id);
+          await this.persist(
+            this.memory,
+            id,
+            previous && !("code" in previous) ? previous : undefined,
+          );
         }
         return result;
       } catch (error) {
