@@ -6,6 +6,7 @@ import {
   prepareTriggering,
   submitTestRun,
   submitTriggering,
+  schemaSubsetError,
   validateSchema,
 } from "./evaluations";
 import { EMPTY_SKILL } from "./skill";
@@ -80,6 +81,18 @@ describe("evaluation protocols", () => {
     expect(
       validateSchema({ action: "create" }, { enum: [{ action: "create" }] }),
     ).toEqual([]);
+  });
+
+  it("rejects structural keywords without compatible types", () => {
+    expect(
+      schemaSubsetError({ properties: { action: { enum: ["create"] } } }),
+    ).toContain("requires type object");
+    expect(schemaSubsetError({ required: ["action"] })).toContain(
+      "requires type object",
+    );
+    expect(schemaSubsetError({ items: { type: "string" } })).toContain(
+      "requires type array",
+    );
   });
 
   it("keeps completed test runs terminal", async () => {

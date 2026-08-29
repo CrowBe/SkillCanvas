@@ -88,6 +88,22 @@ describe("analyzeStructure", () => {
       ),
     ).toBe("# Workflow");
   });
+
+  it("uses the exact frontmatter delimiter for body headings", () => {
+    const raw = [
+      "---",
+      "name: exact-boundary-skill",
+      "description: Use when exact frontmatter boundaries matter.",
+      "---oops: value",
+      "# frontmatter text",
+      "---",
+      "",
+      "# Workflow",
+    ].join("\n");
+    expect(
+      analyzeStructure(raw).sections.map((section) => section.title),
+    ).toEqual(["Workflow"]);
+  });
 });
 
 describe("analyzeLint", () => {

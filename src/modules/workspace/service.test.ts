@@ -133,7 +133,10 @@ describe("WorkspaceService", () => {
     if (!updated.ok) throw new Error(updated.error.message);
     const collision = await service.importSnapshot(exported.value);
     expect(collision.ok).toBe(false);
-    const restored = await service.replaceSnapshot(exported.value);
+    const restored = await service.replaceSnapshot(
+      exported.value,
+      updated.value.workspace,
+    );
     expect(restored.ok).toBe(true);
     if (!restored.ok) return;
     expect(restored.value.revision.revision).toBe(1);
@@ -377,6 +380,35 @@ describe("WorkspaceService schema and submission guards", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("invalid_submission");
   });
+
+  it("preserves an explicitly null final output", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const prepared = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      {
+        contract: {
+          name: "read_null",
+          description: "Return null",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "null" },
+          mockOutput: null,
+        },
+        responseSchema: { type: "null" },
+      },
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const submitted = await service.submitEvaluation(
+      created.value.workspace.id,
+      prepared.value.id,
+      { finalOutput: null },
+    );
+    expect(submitted.ok).toBe(true);
+    if (submitted.ok)
+      expect((submitted.value.data as any).finalOutput).toBeNull();
+  });
 });
 
 describe("snapshot import schema guards", () => {
@@ -469,6 +501,20 @@ describe("snapshot import evaluation data guards", () => {
     });
     const importer = createWorkspaceService(new MemoryWorkspaceStore());
     const imported = await importer.importSnapshot(json);
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
+  it("rejects a test-run evaluation whose seed data is missing", async () => {
+    const json = await snapshotWith((snapshot) => {
+      const testRun = snapshot.evaluations.find(
+        (item: any) => item.kind === "test-run",
+      );
+      delete testRun.data.scenario.seedData;
+    });
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(json);
     expect(imported.ok).toBe(false);
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });

@@ -251,7 +251,10 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
 
   async importSnapshot(
     snapshot: WorkspaceSnapshot,
-    options: { replaceExisting?: boolean } = {},
+    options: {
+      replaceExisting?: boolean;
+      replacementTarget?: WorkspaceRecord;
+    } = {},
   ): Promise<WorkspaceBundle | DomainError> {
     const validation = await this.validateSnapshot(snapshot, options);
     if (validation) return validation;
@@ -261,12 +264,22 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
 
   async validateSnapshot(
     snapshot: WorkspaceSnapshot,
-    options: { replaceExisting?: boolean } = {},
+    options: {
+      replaceExisting?: boolean;
+      replacementTarget?: WorkspaceRecord;
+    } = {},
   ): Promise<DomainError | null> {
+    const existingWorkspace = this.state.workspaces.get(snapshot.workspace.id);
     if (
-      this.state.workspaces.has(snapshot.workspace.id) &&
-      !options.replaceExisting
+      options.replaceExisting &&
+      (!options.replacementTarget ||
+        !sameWorkspace(existingWorkspace, options.replacementTarget))
     )
+      return domainError(
+        "revision_conflict",
+        "The saved workspace changed after replacement was confirmed.",
+      );
+    if (existingWorkspace && !options.replaceExisting)
       return domainError(
         "invalid_snapshot",
         "A workspace with this id already exists and requires confirmed replacement.",
@@ -439,4 +452,19 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       auditEvents: this.workspaceValues(this.state.auditEvents, workspace.id),
     };
   }
+}
+
+function sameWorkspace(
+  left: WorkspaceRecord | undefined,
+  right: WorkspaceRecord,
+): boolean {
+  return (
+    left !== undefined &&
+    left.id === right.id &&
+    left.name === right.name &&
+    left.currentRevision === right.currentRevision &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    left.ephemeral === right.ephemeral
+  );
 }

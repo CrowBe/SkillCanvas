@@ -63,6 +63,7 @@ describe("MemoryWorkspaceStore snapshot admission", () => {
     (snapshot.blobs[0] as { content: string }).content = "corrupt";
     const invalidReplacement = await store.importSnapshot(snapshot, {
       replaceExisting: true,
+      replacementTarget: created.workspace,
     });
     expect("code" in invalidReplacement && invalidReplacement.code).toBe(
       "invalid_snapshot",

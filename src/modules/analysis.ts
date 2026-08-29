@@ -1,5 +1,9 @@
 import { RULESET_VERSION, type SourceSpan } from "./shared";
-import { parseSkillMd, type SkillSource } from "./skill";
+import {
+  parseSkillMd,
+  skillFrontmatterBounds,
+  type SkillSource,
+} from "./skill";
 
 export type LintSeverity = "error" | "warn" | "info";
 export type LintFinding = {
@@ -247,11 +251,9 @@ export function analyzeStructure(raw: string): StructureArtifact {
         },
         body: raw,
       };
-  const closing = parsed.ok ? raw.indexOf("\n---", 4) : -1;
-  const afterDelimiter = closing < 0 ? 0 : closing + 4;
-  const leadingNewlines =
-    raw.slice(afterDelimiter).match(/^(?:\r?\n)+/)?.[0].length ?? 0;
-  const bodyOffset = afterDelimiter + leadingNewlines;
+  const bodyOffset = parsed.ok
+    ? (skillFrontmatterBounds(raw)?.bodyStart ?? 0)
+    : 0;
   return {
     kind: "structure",
     rulesetVersion: RULESET_VERSION,

@@ -109,7 +109,10 @@ export interface WorkspaceService {
     }>
   >;
   importSnapshot(json: string): Promise<Result<WorkspaceBundle>>;
-  replaceSnapshot(json: string): Promise<Result<WorkspaceBundle>>;
+  replaceSnapshot(
+    json: string,
+    replacementTarget: WorkspaceRecord,
+  ): Promise<Result<WorkspaceBundle>>;
 }
 
 export type CompareArtifact = {
@@ -309,7 +312,9 @@ export function createWorkspaceService(
           : evaluation.kind === "test-run"
             ? submitTestRun(
                 evaluation,
-                (input as { finalOutput?: unknown })?.finalOutput ?? input,
+                isSchemaObject(input) && "finalOutput" in input
+                  ? input.finalOutput
+                  : input,
               )
             : err("invalid_submission", "Unsupported evaluation kind.");
       if (!result.ok) return result;
@@ -371,31 +376,31 @@ export function createWorkspaceService(
       if (!decoded.ok) return decoded;
       return fromStore(await store.importSnapshot(decoded.value));
     },
-    async replaceSnapshot(json) {
+    async replaceSnapshot(json, replacementTarget) {
       const decoded = decodeSnapshot(json);
       if (!decoded.ok) return decoded;
       return fromStore(
-        await store.importSnapshot(decoded.value, { replaceExisting: true }),
+        await store.importSnapshot(decoded.value, {
+          replaceExisting: true,
+          replacementTarget,
+        }),
       );
     },
   };
 }
 
 function decodeSnapshot(json: string): Result<WorkspaceSnapshot> {
-      if (byteLength(json) > SNAPSHOT_MAX_BYTES)
-        return err(
-          "size_limit",
-          `Snapshot exceeds ${SNAPSHOT_MAX_BYTES} bytes.`,
-        );
-      let snapshot: WorkspaceSnapshot;
-      try {
-        snapshot = JSON.parse(json) as WorkspaceSnapshot;
-      } catch {
-        return err("invalid_snapshot", "Snapshot is not valid JSON.");
-      }
-      const shape = validateSnapshotShape(snapshot);
-      if (!shape.ok) return shape;
-      return ok(snapshot);
+  if (byteLength(json) > SNAPSHOT_MAX_BYTES)
+    return err("size_limit", `Snapshot exceeds ${SNAPSHOT_MAX_BYTES} bytes.`);
+  let snapshot: WorkspaceSnapshot;
+  try {
+    snapshot = JSON.parse(json) as WorkspaceSnapshot;
+  } catch {
+    return err("invalid_snapshot", "Snapshot is not valid JSON.");
+  }
+  const shape = validateSnapshotShape(snapshot);
+  if (!shape.ok) return shape;
+  return ok(snapshot);
 }
 
 function validateInput(
@@ -942,9 +947,10 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
     }
     if (
       !isSchemaObject(record.scenario) ||
-      typeof (record.scenario as Record<string, unknown>).prompt !== "string"
+      typeof (record.scenario as Record<string, unknown>).prompt !== "string" ||
+      !("seedData" in record.scenario)
     )
-      return "a test run requires a scenario with a prompt.";
+      return "a test run requires a scenario with a prompt and seed data.";
     if (!Array.isArray(record.transcript))
       return "a test run requires a transcript array.";
     for (const step of record.transcript) {

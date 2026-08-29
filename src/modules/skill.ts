@@ -10,19 +10,44 @@ export type SkillSource = {
   readonly body: string;
 };
 
+export type SkillFrontmatterBounds = {
+  readonly yamlStart: number;
+  readonly yamlEnd: number;
+  readonly bodyStart: number;
+};
+
+export function skillFrontmatterBounds(
+  raw: string,
+): SkillFrontmatterBounds | null {
+  const opening = /^---\r?\n/.exec(raw);
+  if (!opening) return null;
+  const closing = /\r?\n---(?:\r?\n|$)/g.exec(raw.slice(opening[0].length));
+  if (!closing) return null;
+  const yamlEnd = opening[0].length + closing.index;
+  const delimiterEnd = yamlEnd + closing[0].length;
+  const leadingNewlines =
+    raw.slice(delimiterEnd).match(/^(?:\r?\n)+/)?.[0].length ?? 0;
+  return {
+    yamlStart: opening[0].length,
+    yamlEnd,
+    bodyStart: delimiterEnd + leadingNewlines,
+  };
+}
+
 export function parseSkillMd(rawInput: string): Result<SkillSource> {
   const raw = rawInput.replace(/\r\n/g, "\n");
   if (byteLength(raw) > SKILL_MAX_BYTES)
     return err("size_limit", `SKILL.md exceeds ${SKILL_MAX_BYTES} bytes.`);
+  const bounds = skillFrontmatterBounds(raw);
   if (!raw.startsWith("---\n"))
     return err("invalid_skill", "SKILL.md must begin with YAML frontmatter.");
-  const closing = /\n---(?:\n|$)/g.exec(raw.slice(3));
-  if (!closing)
+  if (!bounds)
     return err("invalid_skill", "SKILL.md frontmatter is not closed.");
-  const closingStart = closing.index + 3;
   let parsed: unknown;
   try {
-    parsed = parseYaml(raw.slice(4, closingStart), { maxAliasCount: 0 });
+    parsed = parseYaml(raw.slice(bounds.yamlStart, bounds.yamlEnd), {
+      maxAliasCount: 0,
+    });
   } catch {
     return err("invalid_skill", "Could not parse frontmatter YAML.");
   }
@@ -39,9 +64,7 @@ export function parseSkillMd(rawInput: string): Result<SkillSource> {
     return err("size_limit", "Extra frontmatter is too large.");
   return ok({
     frontmatter: { name, description, extra },
-    body: raw
-      .slice(closingStart + closing[0].length)
-      .replace(/^\n+/, ""),
+    body: raw.slice(bounds.bodyStart),
   });
 }
 

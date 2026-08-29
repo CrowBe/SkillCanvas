@@ -360,6 +360,8 @@ export function schemaSubsetError(schema: unknown, path = "$"): string | null {
   )
     return `${path}.type is not a supported JSON Schema type.`;
   if (schema.required !== undefined) {
+    if (schema.type !== "object")
+      return `${path}.required requires type object.`;
     if (
       !Array.isArray(schema.required) ||
       schema.required.some((key) => typeof key !== "string")
@@ -369,6 +371,8 @@ export function schemaSubsetError(schema: unknown, path = "$"): string | null {
   if (schema.enum !== undefined && !Array.isArray(schema.enum))
     return `${path}.enum must be an array.`;
   if (schema.properties !== undefined) {
+    if (schema.type !== "object")
+      return `${path}.properties requires type object.`;
     if (!isSchemaNode(schema.properties))
       return `${path}.properties must be an object.`;
     for (const [key, child] of Object.entries(schema.properties)) {
@@ -377,6 +381,7 @@ export function schemaSubsetError(schema: unknown, path = "$"): string | null {
     }
   }
   if (schema.items !== undefined) {
+    if (schema.type !== "array") return `${path}.items requires type array.`;
     const issue = schemaSubsetError(schema.items, `${path}[]`);
     if (issue) return issue;
   }

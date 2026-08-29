@@ -126,4 +126,27 @@ describe("App WebMCP registration lifecycle", () => {
     expect(await workspaceService.list()).toHaveLength(1);
     confirm.mockRestore();
   });
+
+  it("surfaces rejected browser persistence actions", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await workspaceService.create({ name: "Saved Workspace" });
+    if (!created.ok) throw new Error(created.error.message);
+    const failingService = {
+      ...workspaceService,
+      update: vi.fn().mockRejectedValue(new Error("quota exhausted")),
+    };
+    const { App } = await import("./App");
+    render(<App workspaceService={failingService} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Saved Workspace Revision 1/ }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Source" }));
+    fireEvent.change(document.querySelector(".source-editor")!, {
+      target: { value: `${EMPTY_SKILL}\nChanged` },
+    });
+    fireEvent.click(screen.getByTestId("save-revision"));
+    expect(
+      await screen.findByText(/Action failed: quota exhausted/),
+    ).toBeInTheDocument();
+  });
 });

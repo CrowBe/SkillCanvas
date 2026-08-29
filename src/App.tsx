@@ -142,9 +142,15 @@ export function App({
           setStatus(`Workspace recovery failed: ${message(error)}`);
       });
     if (currentId)
-      workspaceService.open(currentId).then((result) => {
-        if (!cancelled && result.ok) loadBundle(result.value);
-      });
+      workspaceService
+        .open(currentId)
+        .then((result) => {
+          if (!cancelled && result.ok) loadBundle(result.value);
+        })
+        .catch((error) => {
+          if (!cancelled)
+            setStatus(`Workspace recovery failed: ${message(error)}`);
+        });
     const selection = {
       get: () => sessionStorage.getItem("skill-canvas:open-workspace"),
       set: (id: string) =>
@@ -218,6 +224,14 @@ export function App({
     });
     if (result.ok) loadBundle(result.value);
     else setStatus(result.error.message);
+  }
+  async function openWorkspace(workspaceId: string) {
+    const result = await workspaceService.open(workspaceId);
+    if (result.ok) loadBundle(result.value);
+    else setStatus(result.error.message);
+  }
+  async function createFromFile(file: File) {
+    await create(await file.text());
   }
   async function save() {
     if (!bundle) return;
@@ -413,10 +427,15 @@ export function App({
         `Replace saved workspace “${existingName}” with incoming snapshot “${inspection.value.incomingWorkspace.name}”? This will permanently replace the saved workspace's local revisions and evidence.`,
       );
       if (!confirmed) {
-        setStatus("Snapshot import cancelled; the saved workspace was unchanged.");
+        setStatus(
+          "Snapshot import cancelled; the saved workspace was unchanged.",
+        );
         return;
       }
-      result = await workspaceService.replaceSnapshot(json);
+      result = await workspaceService.replaceSnapshot(
+        json,
+        inspection.value.existingWorkspace!,
+      );
     } else {
       result = await workspaceService.importSnapshot(json);
     }
@@ -434,6 +453,32 @@ export function App({
     });
   }
   const parsed = useMemo(() => parseSkillMd(source), [source]);
+
+  function guarded<Args extends readonly unknown[]>(
+    action: (...args: Args) => Promise<void>,
+  ): (...args: Args) => void {
+    return (...args) => {
+      void action(...args).catch((error) => {
+        setStatus(`Action failed: ${message(error)}`);
+      });
+    };
+  }
+
+  const safeCreate = guarded(create);
+  const safeOpenWorkspace = guarded(openWorkspace);
+  const safeCreateFromFile = guarded(createFromFile);
+  const safeSave = guarded(save);
+  const safeAnalyze = guarded(analyze);
+  const safeCompareRevisions = guarded(compareRevisions);
+  const safePrepareTriggering = guarded(prepareTriggering);
+  const safeSubmitTriggeringCase = guarded(submitTriggeringCase);
+  const safePrepareMockedRun = guarded(prepareMockedRun);
+  const safeInvokeManualMock = guarded(invokeManualMock);
+  const safeSubmitFinal = guarded(submitFinal);
+  const safeSubmitMap = guarded(submitMap);
+  const safeExportSkill = guarded(exportSkill);
+  const safeExportSnapshot = guarded(exportSnapshot);
+  const safeImportWorkbenchSnapshot = guarded(importWorkbenchSnapshot);
 
   return (
     <div className="app-shell">
@@ -493,19 +538,15 @@ export function App({
         {!bundle ? (
           <Welcome
             workspaces={workspaces}
-            onOpen={async (workspaceId) => {
-              const result = await workspaceService.open(workspaceId);
-              if (result.ok) loadBundle(result.value);
-              else setStatus(result.error.message);
-            }}
-            onCreate={() => create()}
+            onOpen={safeOpenWorkspace}
+            onCreate={() => safeCreate()}
             onEmpty={() =>
-              create(
+              safeCreate(
                 `---\nname: untitled-skill\ndescription: Use when the user needs this Skill's workflow.\n---\n\n# Untitled skill\n\nDescribe the workflow here.\n`,
               )
             }
-            onFile={async (file) => create(await file.text())}
-            onSnapshotFile={importWorkbenchSnapshot}
+            onFile={safeCreateFromFile}
+            onSnapshotFile={safeImportWorkbenchSnapshot}
           />
         ) : (
           <>
@@ -552,16 +593,16 @@ export function App({
                 </button>
               </div>
               <div className="actions">
-                <button onClick={analyze} data-testid="analyze">
+                <button onClick={safeAnalyze} data-testid="analyze">
                   Analyze
                 </button>
-                <button onClick={compareRevisions}>Compare</button>
-                <button onClick={exportSkill} data-testid="export-skill">
+                <button onClick={safeCompareRevisions}>Compare</button>
+                <button onClick={safeExportSkill} data-testid="export-skill">
                   Export Skill
                 </button>
                 <button
                   className="primary"
-                  onClick={save}
+                  onClick={safeSave}
                   disabled={source === bundle.skillMd}
                   data-testid="save-revision"
                 >
@@ -621,7 +662,7 @@ export function App({
             json={instructionJson}
             vector={instructionVector}
             onChange={setInstructionJson}
-            onSubmit={submitMap}
+            onSubmit={safeSubmitMap}
           />
         )}
         {panel === "evaluate" && (
@@ -631,22 +672,22 @@ export function App({
             setSelected={setSelectedChoice}
             rationale={rationale}
             setRationale={setRationale}
-            onPrepareTrigger={prepareTriggering}
-            onSubmitTrigger={submitTriggeringCase}
-            onPrepareTest={prepareMockedRun}
-            onInvokeMock={invokeManualMock}
+            onPrepareTrigger={safePrepareTriggering}
+            onSubmitTrigger={safeSubmitTriggeringCase}
+            onPrepareTest={safePrepareMockedRun}
+            onInvokeMock={safeInvokeManualMock}
             finalOutput={finalOutput}
             setFinalOutput={setFinalOutput}
-            onSubmitFinal={submitFinal}
+            onSubmitFinal={safeSubmitFinal}
             webMcp={webMcp}
           />
         )}
         {panel === "history" && (
           <HistoryPanel
             compare={compare}
-            onCompare={compareRevisions}
-            onSnapshot={exportSnapshot}
-            onImportSnapshot={importWorkbenchSnapshot}
+            onCompare={safeCompareRevisions}
+            onSnapshot={safeExportSnapshot}
+            onImportSnapshot={safeImportWorkbenchSnapshot}
           />
         )}
         <footer className="evidence-boundary">
