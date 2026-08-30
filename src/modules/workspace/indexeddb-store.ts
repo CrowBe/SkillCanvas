@@ -38,7 +38,11 @@ type PersistCondition =
       readonly target: WorkspaceReplacementTarget;
     }
   | { readonly kind: "artifact"; readonly record: ArtifactRecord }
-  | { readonly kind: "evaluation"; readonly record: EvaluationRecord }
+  | {
+      readonly kind: "evaluation";
+      readonly record: EvaluationRecord;
+      readonly expected?: EvaluationRecord;
+    }
   | { readonly kind: "audit"; readonly record: AuditEvent };
 
 const persistenceError = (
@@ -60,6 +64,10 @@ function sameWorkspace(
     left.updatedAt === right.updatedAt &&
     left.ephemeral === right.ephemeral
   );
+}
+
+function sameRecord(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function domainWorkspace(value: PersistedWorkspace): WorkspaceRecord {
@@ -174,6 +182,50 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     this.hydrated = true;
   }
 
+  private async refreshWorkspace(workspaceId: string): Promise<boolean> {
+    const db = await this.db();
+    const transaction = db.transaction([...STORES], "readonly");
+    const persisted = (await transaction
+      .objectStore("workspaces")
+      .get(workspaceId)) as PersistedWorkspace | undefined;
+    if (!persisted) {
+      await transaction.done;
+      return false;
+    }
+    const revisions = (await transaction
+      .objectStore("revisions")
+      .index("workspaceId")
+      .getAll(workspaceId)) as PersistedRevision[];
+    const [artifacts, evaluations, auditEvents] = (await Promise.all(
+      ["artifacts", "evaluations", "auditEvents"].map((store) =>
+        transaction.objectStore(store).index("workspaceId").getAll(workspaceId),
+      ),
+    )) as [ArtifactRecord[], EvaluationRecord[], AuditEvent[]];
+    const hashes = [
+      ...new Set(revisions.flatMap((revision) => revision.blobHashes)),
+    ];
+    const blobs = (
+      await Promise.all(
+        hashes.map((hash) => transaction.objectStore("blobs").get(hash)),
+      )
+    ).filter((blob): blob is BlobRecord => blob !== undefined);
+    await transaction.done;
+    this.memory.loadValidatedSnapshot(
+      {
+        snapshotVersion: 1,
+        exportedAt: new Date().toISOString(),
+        workspace: domainWorkspace(persisted),
+        revisions: revisions.map(domainRevision),
+        blobs,
+        artifacts,
+        evaluations,
+        auditEvents,
+      },
+      { replaceExisting: true },
+    );
+    return true;
+  }
+
   private async recordCollision(
     store: any,
     records: readonly { id: string; workspaceId: string }[],
@@ -259,6 +311,16 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         conflict = persistenceError(
           "invalid_snapshot",
           `${condition.kind} id collides with existing data.`,
+        );
+      if (
+        condition.kind === "evaluation" &&
+        ((condition.expected === undefined && existing !== undefined) ||
+          (condition.expected !== undefined &&
+            !sameRecord(existing, condition.expected)))
+      )
+        conflict = persistenceError(
+          "revision_conflict",
+          "Evaluation evidence changed in another browser tab.",
         );
       if (!conflict) {
         await Promise.all([
@@ -441,8 +503,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       const plan = condition?.(prior) ?? { kind: "create" };
       const conflict = await this.persist(staged, id, prior, plan);
       if (conflict) {
-        this.memory = new MemoryWorkspaceStore();
-        this.hydrated = false;
+        await this.refreshWorkspace(id);
         if (onConflict) return onConflict(conflict);
         throw new Error(conflict.message);
       }
@@ -451,8 +512,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         if ("code" in committed) throw new Error(committed.message);
         this.memory.loadValidatedSnapshot(committed, { replaceExisting: true });
       } else {
-        this.memory = new MemoryWorkspaceStore();
-        this.hydrated = false;
+        await this.refreshWorkspace(id);
       }
       return result;
     });
@@ -507,7 +567,13 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       (staged) => staged.recordEvaluationEvidence(evaluation),
       () => evaluation.workspaceId,
       evaluation.workspaceId,
-      () => ({ kind: "evaluation", record: evaluation }),
+      (previous) => ({
+        kind: "evaluation",
+        record: evaluation,
+        expected: previous?.evaluations.find(
+          (record) => record.id === evaluation.id,
+        ),
+      }),
     );
   }
 

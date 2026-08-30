@@ -212,8 +212,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       name: "skill_analyze",
       title: "Analyze Skill",
       description:
-        "Computes deterministic lint and structure artifacts for the current revision.",
-      annotations: { readOnlyHint: true },
+        "Computes and stores traceable lint and structure artifacts for the current revision.",
       inputSchema: {
         type: "object",
         required: ["capabilities"],
@@ -347,8 +346,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       name: "skill_compare",
       title: "Compare Skill",
       description:
-        "Compares source, lint summaries, and evaluation references between two revisions.",
-      annotations: { readOnlyHint: true },
+        "Compares revisions and stores the traceable comparison artifact.",
       inputSchema: {
         type: "object",
         required: ["beforeRevision", "afterRevision"],

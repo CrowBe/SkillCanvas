@@ -88,6 +88,22 @@ describe("WebMCP adapter", () => {
     expect(signals.every((signal) => signal.aborted)).toBe(true);
   });
 
+  it("marks only non-persisting read tools as read-only", () => {
+    const handlers = createToolHandlers({
+      service: createWorkspaceService(new MemoryWorkspaceStore()),
+      appearance: appearance(),
+      selection: { get: () => null, set: vi.fn() },
+    });
+    expect(
+      handlers.find((tool) => tool.name === "skill_read")?.annotations
+        ?.readOnlyHint,
+    ).toBe(true);
+    for (const name of ["skill_analyze", "skill_compare"])
+      expect(
+        handlers.find((tool) => tool.name === name)?.annotations?.readOnlyHint,
+      ).not.toBe(true);
+  });
+
   it("automatically registers and cleans up a run-scoped mock tool", async () => {
     const registered: { tool: WebMcpTool; signal?: AbortSignal }[] = [];
     const context = {

@@ -3,10 +3,12 @@ import type { IDBPDatabase } from "idb";
 import { EMPTY_SKILL } from "../skill";
 import { IndexedDbWorkspaceStore } from "./indexeddb-store";
 import { MemoryWorkspaceStore } from "./memory-store";
+import { createWorkspaceService } from "./service";
 
 function databaseControl() {
   let failWrites = false;
   const deletedBlobs: string[] = [];
+  const databaseGetAlls: string[] = [];
   const transactionGetAlls: string[] = [];
   const records = new Map(
     [
@@ -19,7 +21,10 @@ function databaseControl() {
     ].map(([name, key]) => [name, { key, values: new Map<string, any>() }]),
   );
   const database = {
-    getAll: async (name: string) => [...records.get(name)!.values.values()],
+    getAll: async (name: string) => {
+      databaseGetAlls.push(name);
+      return [...records.get(name)!.values.values()];
+    },
     get: async (name: string, key: string) =>
       records.get(name)!.values.get(key),
     transaction: () => ({
@@ -69,8 +74,10 @@ function databaseControl() {
     },
     deletedBlobs,
     transactionGetAlls,
+    databaseGetAlls,
     clearReadLog() {
       transactionGetAlls.length = 0;
+      databaseGetAlls.length = 0;
     },
     referenceBlobFromOtherWorkspace(hash: string) {
       records.get("revisions")!.values.set("other:1", {
@@ -406,7 +413,66 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       data: {},
     });
     expect(control.transactionGetAlls).not.toContain("blobs");
-    expect(control.transactionGetAlls).toEqual([]);
+    expect(control.databaseGetAlls).toEqual([]);
+    control.clearReadLog();
+    await store.putArtifact({
+      id: "second-targeted-artifact",
+      workspaceId: created.workspace.id,
+      revision: 1,
+      kind: "structure",
+      version: "1",
+      createdAt: new Date().toISOString(),
+      data: {},
+    });
+    expect(control.databaseGetAlls).toEqual([]);
+    expect(control.transactionGetAlls).not.toContain("blobs");
+  });
+
+  it("rejects stale updates to the same evaluation record", async () => {
+    const control = databaseControl();
+    const firstStore = new IndexedDbWorkspaceStore(control.database);
+    const first = createWorkspaceService(firstStore);
+    const created = await first.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const prepared = await first.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const second = createWorkspaceService(
+      new IndexedDbWorkspaceStore(control.database),
+    );
+    const stale = await second.open(created.value.workspace.id);
+    if (!stale.ok) throw new Error(stale.error.message);
+    const firstCase = (prepared.value.data as any).cases[0];
+    const accepted = await first.submitEvaluation(
+      created.value.workspace.id,
+      prepared.value.id,
+      {
+        caseId: firstCase.id,
+        selectedChoiceId: firstCase.choices[0].id,
+        rationale: "First tab evidence",
+      },
+    );
+    if (!accepted.ok) throw new Error(accepted.error.message);
+    await expect(
+      second.submitEvaluation(created.value.workspace.id, prepared.value.id, {
+        caseId: firstCase.id,
+        selectedChoiceId: firstCase.choices[1].id,
+        rationale: "Stale tab evidence",
+      }),
+    ).rejects.toThrow("Evaluation evidence changed");
+    const reader = createWorkspaceService(
+      new IndexedDbWorkspaceStore(control.database),
+    );
+    const current = await reader.open(created.value.workspace.id);
+    if (!current.ok) throw new Error(current.error.message);
+    const evaluation = current.value.evaluations.find(
+      (record) => record.id === prepared.value.id,
+    )!;
+    expect((evaluation.data as any).observations[0].rationale).toBe(
+      "First tab evidence",
+    );
   });
 });
 

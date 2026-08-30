@@ -149,4 +149,25 @@ describe("App WebMCP registration lifecycle", () => {
       await screen.findByText(/Action failed: quota exhausted/),
     ).toBeInTheDocument();
   });
+
+  it("surfaces persistence failures from the empty lint action", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await workspaceService.create({ name: "Saved Workspace" });
+    if (!created.ok) throw new Error(created.error.message);
+    const failingService = {
+      ...workspaceService,
+      analyze: vi.fn().mockRejectedValue(new Error("analysis quota exhausted")),
+    };
+    const { App } = await import("./App");
+    render(<App workspaceService={failingService} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Saved Workspace Revision 1/ }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Analyze current revision" }),
+    );
+    expect(
+      await screen.findByText(/Action failed: analysis quota exhausted/),
+    ).toBeInTheDocument();
+  });
 });

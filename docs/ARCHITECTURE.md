@@ -116,7 +116,7 @@ type ToolEnvelope<T> = {
 };
 ```
 
-Deterministic artifacts and agent-supplied judgments occupy separate fields/records. Read tools are side-effect-free with respect to Skill content. Analysis may recompute its versioned artifact cache but never appends a Skill revision.
+Deterministic artifacts and agent-supplied judgments occupy separate fields/records. `skill_read` and appearance reads are side-effect-free. Analysis and comparison deliberately persist traceable artifacts, so those tools are not annotated read-only; neither appends a Skill revision.
 
 ## Appearance seam
 

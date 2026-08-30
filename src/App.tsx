@@ -653,7 +653,7 @@ export function App({
           <LintPanel
             lint={lint}
             structure={structure}
-            onAnalyze={analyze}
+            onAnalyze={safeAnalyze}
             onJump={jumpTo}
           />
         )}
