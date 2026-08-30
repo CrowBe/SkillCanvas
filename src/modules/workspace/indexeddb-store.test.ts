@@ -7,6 +7,7 @@ import { MemoryWorkspaceStore } from "./memory-store";
 function databaseControl() {
   let failWrites = false;
   const deletedBlobs: string[] = [];
+  const transactionGetAlls: string[] = [];
   const records = new Map(
     [
       ["workspaces", "id"],
@@ -19,11 +20,31 @@ function databaseControl() {
   );
   const database = {
     getAll: async (name: string) => [...records.get(name)!.values.values()],
+    get: async (name: string, key: string) =>
+      records.get(name)!.values.get(key),
     transaction: () => ({
       objectStore: (name: string) => {
         const store = records.get(name)!;
         return {
-          getAll: async () => [...store.values.values()],
+          get: async (key: string) => store.values.get(key),
+          getAll: async () => {
+            transactionGetAlls.push(name);
+            return [...store.values.values()];
+          },
+          index: (indexName: string) => ({
+            getAll: async (key: string) => {
+              transactionGetAlls.push(`${name}.${indexName}`);
+              return [...store.values.values()].filter(
+                (value) => value[indexName] === key,
+              );
+            },
+            count: async (key: string) =>
+              [...store.values.values()].filter((value) =>
+                Array.isArray(value[indexName])
+                  ? value[indexName].includes(key)
+                  : value[indexName] === key,
+              ).length,
+          }),
           put: async (value: any) => {
             if (failWrites) throw new Error("persistence failed");
             store.values.set(value[store.key], structuredClone(value));
@@ -47,6 +68,10 @@ function databaseControl() {
       failWrites = false;
     },
     deletedBlobs,
+    transactionGetAlls,
+    clearReadLog() {
+      transactionGetAlls.length = 0;
+    },
     referenceBlobFromOtherWorkspace(hash: string) {
       records.get("revisions")!.values.set("other:1", {
         key: "other:1",
@@ -54,6 +79,7 @@ function databaseControl() {
         revision: 1,
         contentHash: hash,
         references: [],
+        blobHashes: [hash],
       });
     },
   };
@@ -134,7 +160,7 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     if ("code" in updated) throw new Error(updated.message);
     const restored = await store.importSnapshot(snapshot, {
       replaceExisting: true,
-      replacementTarget: updated.workspace,
+      replacementTarget: await replacementTarget(store, updated.workspace.id),
     });
     if ("code" in restored) throw new Error(restored.message);
     expect(restored.revision.revision).toBe(1);
@@ -165,7 +191,7 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     await expect(
       store.importSnapshot(snapshot, {
         replaceExisting: true,
-        replacementTarget: updated.workspace,
+        replacementTarget: await replacementTarget(store, updated.workspace.id),
       }),
     ).rejects.toThrow("persistence failed");
     const unchanged = await store.openWorkspace(created.workspace.id);
@@ -228,7 +254,7 @@ describe("IndexedDbWorkspaceStore transactions", () => {
 
     const restored = await store.importSnapshot(snapshot, {
       replaceExisting: true,
-      replacementTarget: updated.workspace,
+      replacementTarget: await replacementTarget(store, updated.workspace.id),
     });
     if ("code" in restored) throw new Error(restored.message);
     expect(control.deletedBlobs).not.toContain(updated.revision.contentHash);
@@ -274,8 +300,8 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     const snapshot = await first.exportSnapshot(created.workspace.id);
     if ("code" in snapshot) throw new Error(snapshot.message);
     const stale = new IndexedDbWorkspaceStore(control.database);
-    const confirmed = await stale.openWorkspace(created.workspace.id);
-    if ("code" in confirmed) throw new Error(confirmed.message);
+    await stale.openWorkspace(created.workspace.id);
+    const confirmed = await replacementTarget(stale, created.workspace.id);
     await first.appendRevision({
       workspaceId: created.workspace.id,
       baseRevision: 1,
@@ -284,10 +310,111 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     });
     const rejected = await stale.importSnapshot(snapshot, {
       replaceExisting: true,
-      replacementTarget: confirmed.workspace,
+      replacementTarget: confirmed,
     });
     expect("code" in rejected && rejected.code).toBe("revision_conflict");
     const current = await stale.openWorkspace(created.workspace.id);
     expect("code" in current ? undefined : current.revision.revision).toBe(2);
   });
+
+  it("preserves concurrent evidence records from separate tabs", async () => {
+    const control = databaseControl();
+    const first = new IndexedDbWorkspaceStore(control.database);
+    const created = await first.createWorkspace({
+      name: "evidence",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    const second = new IndexedDbWorkspaceStore(control.database);
+    await second.openWorkspace(created.workspace.id);
+    await first.putArtifact({
+      id: "artifact-first",
+      workspaceId: created.workspace.id,
+      revision: 1,
+      kind: "lint",
+      version: "1",
+      createdAt: new Date().toISOString(),
+      data: {},
+    });
+    await second.putArtifact({
+      id: "artifact-second",
+      workspaceId: created.workspace.id,
+      revision: 1,
+      kind: "structure",
+      version: "1",
+      createdAt: new Date().toISOString(),
+      data: {},
+    });
+    const reader = new IndexedDbWorkspaceStore(control.database);
+    const current = await reader.openWorkspace(created.workspace.id);
+    expect(
+      "code" in current
+        ? []
+        : current.artifacts.map((artifact) => artifact.id).sort(),
+    ).toEqual(["artifact-first", "artifact-second"]);
+  });
+
+  it("rejects replacement after persisted evidence changes", async () => {
+    const control = databaseControl();
+    const first = new IndexedDbWorkspaceStore(control.database);
+    const created = await first.createWorkspace({
+      name: "evidence",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    const snapshot = await first.exportSnapshot(created.workspace.id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    const confirmed = await replacementTarget(first, created.workspace.id);
+    const second = new IndexedDbWorkspaceStore(control.database);
+    await second.putArtifact({
+      id: "new-evidence",
+      workspaceId: created.workspace.id,
+      revision: 1,
+      kind: "lint",
+      version: "1",
+      createdAt: new Date().toISOString(),
+      data: {},
+    });
+    const rejected = await first.importSnapshot(snapshot, {
+      replaceExisting: true,
+      replacementTarget: confirmed,
+    });
+    expect("code" in rejected && rejected.code).toBe("revision_conflict");
+    const reader = new IndexedDbWorkspaceStore(control.database);
+    const current = await reader.openWorkspace(created.workspace.id);
+    expect(
+      "code" in current ? [] : current.artifacts.map((artifact) => artifact.id),
+    ).toContain("new-evidence");
+  });
+
+  it("does not scan blob contents for ordinary mutations", async () => {
+    const control = databaseControl();
+    const store = new IndexedDbWorkspaceStore(control.database);
+    const created = await store.createWorkspace({
+      name: "scaled",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    control.clearReadLog();
+    await store.putArtifact({
+      id: "targeted-artifact",
+      workspaceId: created.workspace.id,
+      revision: 1,
+      kind: "lint",
+      version: "1",
+      createdAt: new Date().toISOString(),
+      data: {},
+    });
+    expect(control.transactionGetAlls).not.toContain("blobs");
+    expect(control.transactionGetAlls).toEqual([]);
+  });
 });
+
+async function replacementTarget(
+  store: IndexedDbWorkspaceStore,
+  workspaceId: string,
+) {
+  const target = await store.getReplacementTarget(workspaceId);
+  if ("code" in target) throw new Error(target.message);
+  return target;
+}

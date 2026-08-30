@@ -41,6 +41,7 @@ import type {
   EvaluationRecord,
   WorkspaceBundle,
   WorkspaceRecord,
+  WorkspaceReplacementTarget,
   WorkspaceSnapshot,
   WorkspaceStore,
 } from "./types";
@@ -105,13 +106,14 @@ export interface WorkspaceService {
     Result<{
       incomingWorkspace: WorkspaceRecord;
       existingWorkspace?: WorkspaceRecord;
+      replacementTarget?: WorkspaceReplacementTarget;
       collision: boolean;
     }>
   >;
   importSnapshot(json: string): Promise<Result<WorkspaceBundle>>;
   replaceSnapshot(
     json: string,
-    replacementTarget: WorkspaceRecord,
+    replacementTarget: WorkspaceReplacementTarget,
   ): Promise<Result<WorkspaceBundle>>;
 }
 
@@ -361,13 +363,15 @@ export function createWorkspaceService(
     async inspectSnapshotImport(json) {
       const decoded = decodeSnapshot(json);
       if (!decoded.ok) return decoded;
-      const workspaces = await store.listWorkspaces();
-      const existingWorkspace = workspaces.find(
-        (workspace) => workspace.id === decoded.value.workspace.id,
+      const target = await store.getReplacementTarget(
+        decoded.value.workspace.id,
       );
+      const replacementTarget = "code" in target ? undefined : target;
+      const existingWorkspace = replacementTarget?.workspace;
       return ok({
         incomingWorkspace: decoded.value.workspace,
         ...(existingWorkspace ? { existingWorkspace } : {}),
+        ...(replacementTarget ? { replacementTarget } : {}),
         collision: existingWorkspace !== undefined,
       });
     },

@@ -4,16 +4,18 @@ import { MemoryWorkspaceStore } from "./memory-store";
 import type {
   ArtifactRecord,
   AuditEvent,
+  BlobRecord,
   EvaluationRecord,
   SkillRevision,
   WorkspaceBundle,
   WorkspaceRecord,
+  WorkspaceReplacementTarget,
   WorkspaceSnapshot,
   WorkspaceStore,
 } from "./types";
 
 const DATABASE_NAME = "skill-canvas-workspaces";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const STORES = [
   "workspaces",
   "revisions",
@@ -23,14 +25,21 @@ const STORES = [
   "auditEvents",
 ] as const;
 
+type PersistedWorkspace = WorkspaceRecord & { persistenceGeneration: number };
+type PersistedRevision = SkillRevision & {
+  key: string;
+  blobHashes: readonly string[];
+};
 type PersistCondition =
   | { readonly kind: "create" }
   | { readonly kind: "append"; readonly baseRevision: number }
   | {
       readonly kind: "replace";
-      readonly target: WorkspaceRecord;
+      readonly target: WorkspaceReplacementTarget;
     }
-  | { readonly kind: "existing"; readonly target: WorkspaceRecord };
+  | { readonly kind: "artifact"; readonly record: ArtifactRecord }
+  | { readonly kind: "evaluation"; readonly record: EvaluationRecord }
+  | { readonly kind: "audit"; readonly record: AuditEvent };
 
 const persistenceError = (
   code: DomainError["code"],
@@ -53,12 +62,50 @@ function sameWorkspace(
   );
 }
 
-/**
- * Durable browser adapter. Domain behavior remains in the memory contract
- * implementation; this adapter hydrates/persists the same bounded records in
- * separate versioned object stores. Immutable blobs are keyed by byte-exact
- * hash, so identical SKILL.md/reference content is stored once.
- */
+function domainWorkspace(value: PersistedWorkspace): WorkspaceRecord {
+  const { persistenceGeneration: _, ...workspace } = value;
+  return workspace;
+}
+
+function persistedRevision(revision: SkillRevision): PersistedRevision {
+  return {
+    ...revision,
+    key: `${revision.workspaceId}:${revision.revision}`,
+    blobHashes: [
+      revision.contentHash,
+      ...revision.references.map((reference) => reference.contentHash),
+    ],
+  };
+}
+
+function domainRevision(value: PersistedRevision): SkillRevision {
+  const { key: _, blobHashes: __, ...revision } = value;
+  return revision;
+}
+
+function installIndexes(transaction: any): void {
+  const revisions = transaction.objectStore("revisions");
+  if (!revisions.indexNames.contains("workspaceId"))
+    revisions.createIndex("workspaceId", "workspaceId");
+  if (!revisions.indexNames.contains("blobHashes"))
+    revisions.createIndex("blobHashes", "blobHashes", { multiEntry: true });
+  for (const name of ["artifacts", "evaluations", "auditEvents"] as const) {
+    const store = transaction.objectStore(name);
+    if (!store.indexNames.contains("workspaceId"))
+      store.createIndex("workspaceId", "workspaceId");
+  }
+}
+
+async function migrateRevisionHashes(store: any): Promise<void> {
+  let cursor = await store.openCursor();
+  while (cursor) {
+    const value = cursor.value as PersistedRevision;
+    if (!Array.isArray(value.blobHashes))
+      await cursor.update(persistedRevision(value));
+    cursor = await cursor.continue();
+  }
+}
+
 export class IndexedDbWorkspaceStore implements WorkspaceStore {
   private memory = new MemoryWorkspaceStore();
   private database?: IDBPDatabase;
@@ -72,7 +119,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   private async db(): Promise<IDBPDatabase> {
     if (this.database) return this.database;
     this.database = await openDB(DATABASE_NAME, DATABASE_VERSION, {
-      upgrade(database, oldVersion) {
+      upgrade(database, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
           database.createObjectStore("workspaces", { keyPath: "id" });
           database.createObjectStore("revisions", { keyPath: "key" });
@@ -80,6 +127,12 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
           database.createObjectStore("artifacts", { keyPath: "id" });
           database.createObjectStore("evaluations", { keyPath: "id" });
           database.createObjectStore("auditEvents", { keyPath: "id" });
+        }
+        if (oldVersion < 2) {
+          installIndexes(transaction);
+          void migrateRevisionHashes(
+            transaction.objectStore("revisions"),
+          ).catch(() => transaction.abort());
         }
       },
     });
@@ -91,26 +144,19 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     const db = await this.db();
     const [workspaces, revisions, blobs, artifacts, evaluations, auditEvents] =
       await Promise.all(STORES.map((store) => db.getAll(store)));
-    for (const workspace of workspaces as any[]) {
+    for (const persisted of workspaces as PersistedWorkspace[]) {
+      const workspace = domainWorkspace(persisted);
+      const workspaceRevisions = (revisions as PersistedRevision[]).filter(
+        (item) => item.workspaceId === workspace.id,
+      );
       const snapshot: WorkspaceSnapshot = {
         snapshotVersion: 1,
         exportedAt: new Date().toISOString(),
         workspace,
-        revisions: (revisions as any[])
-          .filter((item) => item.workspaceId === workspace.id)
-          .map((item) => {
-            const revision = { ...item };
-            delete revision.key;
-            return revision;
-          }),
-        blobs: (blobs as any[]).filter((blob) =>
-          (revisions as any[]).some(
-            (revision) =>
-              revision.workspaceId === workspace.id &&
-              (revision.contentHash === blob.hash ||
-                revision.references.some(
-                  (ref: any) => ref.contentHash === blob.hash,
-                )),
+        revisions: workspaceRevisions.map(domainRevision),
+        blobs: (blobs as BlobRecord[]).filter((blob) =>
+          workspaceRevisions.some((revision) =>
+            revision.blobHashes.includes(blob.hash),
           ),
         ),
         artifacts: (artifacts as ArtifactRecord[]).filter(
@@ -128,35 +174,41 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     this.hydrated = true;
   }
 
+  private async recordCollision(
+    store: any,
+    records: readonly { id: string; workspaceId: string }[],
+    workspaceId: string,
+    label: string,
+  ): Promise<DomainError | null> {
+    for (const record of records) {
+      const persisted = await store.get(record.id);
+      if (persisted && persisted.workspaceId !== workspaceId)
+        return persistenceError(
+          "invalid_snapshot",
+          `Snapshot ${label} id ${record.id} collides with existing data.`,
+        );
+    }
+    return null;
+  }
+
   private async persist(
     memory: MemoryWorkspaceStore,
     workspaceId: string,
+    previous: WorkspaceSnapshot | undefined,
     condition: PersistCondition,
   ): Promise<DomainError | null> {
     const snapshot = await memory.exportSnapshot(workspaceId);
     if ("code" in snapshot) throw new Error(snapshot.message);
     const db = await this.db();
     const transaction = db.transaction([...STORES], "readwrite");
-    const [
-      workspaces,
-      persistedRevisions,
-      ,
-      artifacts,
-      evaluations,
-      auditEvents,
-    ] = (await Promise.all(
-      STORES.map((store) => transaction.objectStore(store).getAll()),
-    )) as [
-      WorkspaceRecord[],
-      (SkillRevision & { key: string })[],
-      unknown[],
-      ArtifactRecord[],
-      EvaluationRecord[],
-      AuditEvent[],
-    ];
-    const persistedWorkspace = workspaces.find(
-      (workspace) => workspace.id === workspaceId,
-    );
+    const workspaceStore = transaction.objectStore("workspaces");
+    const persistedWorkspace = (await workspaceStore.get(workspaceId)) as
+      PersistedWorkspace | undefined;
+    const workspace = persistedWorkspace
+      ? domainWorkspace(persistedWorkspace)
+      : undefined;
+    const generation = persistedWorkspace?.persistenceGeneration ?? 0;
+
     let conflict: DomainError | null = null;
     if (condition.kind === "create" && persistedWorkspace)
       conflict = persistenceError(
@@ -165,117 +217,194 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       );
     if (
       condition.kind === "append" &&
-      persistedWorkspace?.currentRevision !== condition.baseRevision
+      workspace?.currentRevision !== condition.baseRevision
     )
       conflict = persistenceError(
         "revision_conflict",
         "The workspace changed after this edit began.",
         {
-          expectedBaseRevision: persistedWorkspace?.currentRevision,
+          expectedBaseRevision: workspace?.currentRevision,
           receivedBaseRevision: condition.baseRevision,
         },
       );
     if (
-      (condition.kind === "replace" || condition.kind === "existing") &&
-      !sameWorkspace(persistedWorkspace, condition.target)
+      condition.kind === "replace" &&
+      (!sameWorkspace(workspace, condition.target.workspace) ||
+        generation !== condition.target.generation)
     )
       conflict = persistenceError(
         "revision_conflict",
-        condition.kind === "replace"
-          ? "The saved workspace changed after replacement was confirmed."
-          : "The workspace changed in another browser tab.",
+        "The saved workspace changed after replacement was confirmed.",
       );
-    for (const [records, incoming, label] of [
-      [artifacts, snapshot.artifacts, "artifact"],
-      [evaluations, snapshot.evaluations, "evaluation"],
-      [auditEvents, snapshot.auditEvents, "audit event"],
-    ] as const) {
-      if (
-        incoming.some((record) =>
-          records.some(
-            (persisted) =>
-              persisted.id === record.id &&
-              persisted.workspaceId !== workspaceId,
-          ),
-        )
-      )
+    if (
+      condition.kind === "artifact" ||
+      condition.kind === "evaluation" ||
+      condition.kind === "audit"
+    ) {
+      if (!persistedWorkspace)
+        conflict = persistenceError(
+          "workspace_not_found",
+          "Workspace was not found.",
+        );
+      const storeName =
+        condition.kind === "artifact"
+          ? "artifacts"
+          : condition.kind === "evaluation"
+            ? "evaluations"
+            : "auditEvents";
+      const existing = await transaction
+        .objectStore(storeName)
+        .get(condition.record.id);
+      if (existing && existing.workspaceId !== workspaceId)
         conflict = persistenceError(
           "invalid_snapshot",
-          `Snapshot ${label} id collides with existing data.`,
+          `${condition.kind} id collides with existing data.`,
         );
+      if (!conflict) {
+        await Promise.all([
+          transaction.objectStore(storeName).put(condition.record),
+          workspaceStore.put({
+            ...persistedWorkspace!,
+            persistenceGeneration: generation + 1,
+          }),
+          transaction.done,
+        ]);
+        return null;
+      }
+    }
+
+    for (const [storeName, records, label] of [
+      ["artifacts", snapshot.artifacts, "artifact"],
+      ["evaluations", snapshot.evaluations, "evaluation"],
+      ["auditEvents", snapshot.auditEvents, "audit event"],
+    ] as const) {
+      conflict ??= await this.recordCollision(
+        transaction.objectStore(storeName),
+        records,
+        workspaceId,
+        label,
+      );
     }
     if (conflict) {
       await transaction.done;
       return conflict;
     }
-    const priorRevisions = persistedRevisions.filter(
-      (revision) => revision.workspaceId === workspaceId,
-    );
-    const priorArtifacts = artifacts.filter(
-      (artifact) => artifact.workspaceId === workspaceId,
-    );
-    const priorEvaluations = evaluations.filter(
-      (evaluation) => evaluation.workspaceId === workspaceId,
-    );
-    const priorAuditEvents = auditEvents.filter(
-      (event) => event.workspaceId === workspaceId,
-    );
-    const currentHashes = new Set(snapshot.blobs.map((blob) => blob.hash));
-    const staleHashes = [
-      ...new Set(
-        priorRevisions.flatMap((revision) => [
-          revision.contentHash,
-          ...revision.references.map((reference) => reference.contentHash),
-        ]),
-      ),
-    ].filter(
-      (hash) =>
-        !currentHashes.has(hash) &&
-        !persistedRevisions.some(
-          (revision) =>
-            revision.workspaceId !== workspaceId &&
-            (revision.contentHash === hash ||
-              revision.references.some(
-                (reference) => reference.contentHash === hash,
-              )),
-        ),
-    );
-    await Promise.all([
-      ...priorRevisions.map((revision) =>
-        transaction
-          .objectStore("revisions")
-          .delete(`${revision.workspaceId}:${revision.revision}`),
-      ),
-      ...priorArtifacts.map((artifact) =>
-        transaction.objectStore("artifacts").delete(artifact.id),
-      ),
-      ...priorEvaluations.map((evaluation) =>
-        transaction.objectStore("evaluations").delete(evaluation.id),
-      ),
-      ...priorAuditEvents.map((event) =>
-        transaction.objectStore("auditEvents").delete(event.id),
-      ),
-      ...staleHashes.map((hash) =>
-        transaction.objectStore("blobs").delete(hash),
-      ),
-      transaction.objectStore("workspaces").put(snapshot.workspace),
-      ...snapshot.revisions.map((revision) =>
-        transaction.objectStore("revisions").put({
-          ...revision,
-          key: `${revision.workspaceId}:${revision.revision}`,
+
+    if (condition.kind === "append") {
+      const revision = snapshot.revisions.find(
+        (item) => item.revision === condition.baseRevision + 1,
+      )!;
+      const previousAuditIds = new Set(
+        previous?.auditEvents.map((event) => event.id),
+      );
+      const newAuditEvents = snapshot.auditEvents.filter(
+        (event) => !previousAuditIds.has(event.id),
+      );
+      await Promise.all([
+        workspaceStore.put({
+          ...snapshot.workspace,
+          persistenceGeneration: generation + 1,
         }),
+        transaction.objectStore("revisions").put(persistedRevision(revision)),
+        ...snapshot.blobs.map((blob) =>
+          transaction.objectStore("blobs").put(blob),
+        ),
+        ...newAuditEvents.map((event) =>
+          transaction.objectStore("auditEvents").put(event),
+        ),
+        transaction.done,
+      ]);
+      return null;
+    }
+
+    if (condition.kind === "replace") {
+      const revisions = (await transaction
+        .objectStore("revisions")
+        .index("workspaceId")
+        .getAll(workspaceId)) as PersistedRevision[];
+      const artifacts = (await transaction
+        .objectStore("artifacts")
+        .index("workspaceId")
+        .getAll(workspaceId)) as ArtifactRecord[];
+      const evaluations = (await transaction
+        .objectStore("evaluations")
+        .index("workspaceId")
+        .getAll(workspaceId)) as EvaluationRecord[];
+      const auditEvents = (await transaction
+        .objectStore("auditEvents")
+        .index("workspaceId")
+        .getAll(workspaceId)) as AuditEvent[];
+      const currentHashes = new Set(snapshot.blobs.map((blob) => blob.hash));
+      const hashCounts = new Map<string, number>();
+      for (const revision of revisions)
+        for (const hash of new Set(revision.blobHashes))
+          hashCounts.set(hash, (hashCounts.get(hash) ?? 0) + 1);
+      const staleHashes: string[] = [];
+      for (const [hash, targetCount] of hashCounts)
+        if (
+          !currentHashes.has(hash) &&
+          (await transaction
+            .objectStore("revisions")
+            .index("blobHashes")
+            .count(hash)) === targetCount
+        )
+          staleHashes.push(hash);
+      await Promise.all([
+        ...revisions.map((revision) =>
+          transaction.objectStore("revisions").delete(revision.key),
+        ),
+        ...artifacts.map((record) =>
+          transaction.objectStore("artifacts").delete(record.id),
+        ),
+        ...evaluations.map((record) =>
+          transaction.objectStore("evaluations").delete(record.id),
+        ),
+        ...auditEvents.map((record) =>
+          transaction.objectStore("auditEvents").delete(record.id),
+        ),
+        ...staleHashes.map((hash) =>
+          transaction.objectStore("blobs").delete(hash),
+        ),
+        workspaceStore.put({
+          ...snapshot.workspace,
+          persistenceGeneration: generation + 1,
+        }),
+        ...snapshot.revisions.map((revision) =>
+          transaction.objectStore("revisions").put(persistedRevision(revision)),
+        ),
+        ...snapshot.blobs.map((blob) =>
+          transaction.objectStore("blobs").put(blob),
+        ),
+        ...snapshot.artifacts.map((record) =>
+          transaction.objectStore("artifacts").put(record),
+        ),
+        ...snapshot.evaluations.map((record) =>
+          transaction.objectStore("evaluations").put(record),
+        ),
+        ...snapshot.auditEvents.map((record) =>
+          transaction.objectStore("auditEvents").put(record),
+        ),
+        transaction.done,
+      ]);
+      return null;
+    }
+
+    await Promise.all([
+      workspaceStore.put({ ...snapshot.workspace, persistenceGeneration: 1 }),
+      ...snapshot.revisions.map((revision) =>
+        transaction.objectStore("revisions").put(persistedRevision(revision)),
       ),
       ...snapshot.blobs.map((blob) =>
         transaction.objectStore("blobs").put(blob),
       ),
-      ...snapshot.artifacts.map((artifact) =>
-        transaction.objectStore("artifacts").put(artifact),
+      ...snapshot.artifacts.map((record) =>
+        transaction.objectStore("artifacts").put(record),
       ),
-      ...snapshot.evaluations.map((evaluation) =>
-        transaction.objectStore("evaluations").put(evaluation),
+      ...snapshot.evaluations.map((record) =>
+        transaction.objectStore("evaluations").put(record),
       ),
-      ...snapshot.auditEvents.map((event) =>
-        transaction.objectStore("auditEvents").put(event),
+      ...snapshot.auditEvents.map((record) =>
+        transaction.objectStore("auditEvents").put(record),
       ),
       transaction.done,
     ]);
@@ -299,34 +428,32 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     onConflict?: (error: DomainError) => T,
   ): Promise<T> {
     return this.enqueueMutation(async () => {
+      await this.hydrate();
       const previous = targetWorkspaceId
         ? await this.memory.exportSnapshot(targetWorkspaceId)
         : undefined;
+      const prior = previous && !("code" in previous) ? previous : undefined;
       const staged = new MemoryWorkspaceStore();
-      if (previous && !("code" in previous)) {
-        staged.loadValidatedSnapshot(previous);
-      }
+      if (prior) staged.loadValidatedSnapshot(prior);
       const result = await operation(staged);
       const id = workspaceId(result);
       if (id === undefined) return result;
-      const conflict = await this.persist(
-        staged,
-        id,
-        condition?.(
-          previous && !("code" in previous) ? previous : undefined,
-        ) ?? { kind: "create" },
-      );
+      const plan = condition?.(prior) ?? { kind: "create" };
+      const conflict = await this.persist(staged, id, prior, plan);
       if (conflict) {
         this.memory = new MemoryWorkspaceStore();
         this.hydrated = false;
         if (onConflict) return onConflict(conflict);
         throw new Error(conflict.message);
       }
-      const committed = await staged.exportSnapshot(id);
-      if ("code" in committed) throw new Error(committed.message);
-      this.memory.loadValidatedSnapshot(committed, {
-        replaceExisting: true,
-      });
+      if (plan.kind === "create" || plan.kind === "replace") {
+        const committed = await staged.exportSnapshot(id);
+        if ("code" in committed) throw new Error(committed.message);
+        this.memory.loadValidatedSnapshot(committed, { replaceExisting: true });
+      } else {
+        this.memory = new MemoryWorkspaceStore();
+        this.hydrated = false;
+      }
       return result;
     });
   }
@@ -342,14 +469,17 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       () => ({ kind: "create" }),
     );
   }
+
   async listWorkspaces() {
     await this.hydrate();
     return this.memory.listWorkspaces();
   }
+
   async openWorkspace(workspaceId: string, revision?: number) {
     await this.hydrate();
     return this.memory.openWorkspace(workspaceId, revision);
   }
+
   async appendRevision(input: Parameters<WorkspaceStore["appendRevision"]>[0]) {
     await this.hydrate();
     return this.commitMutation(
@@ -360,59 +490,78 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       (error) => error,
     );
   }
+
   async putArtifact(artifact: ArtifactRecord) {
     await this.hydrate();
     await this.commitMutation(
-      async (staged) => {
-        await staged.putArtifact(artifact);
-      },
+      (staged) => staged.putArtifact(artifact),
       () => artifact.workspaceId,
       artifact.workspaceId,
-      (previous) => ({ kind: "existing", target: previous!.workspace }),
+      () => ({ kind: "artifact", record: artifact }),
     );
   }
+
   async recordEvaluationEvidence(evaluation: EvaluationRecord) {
     await this.hydrate();
     await this.commitMutation(
-      async (staged) => {
-        await staged.recordEvaluationEvidence(evaluation);
-      },
+      (staged) => staged.recordEvaluationEvidence(evaluation),
       () => evaluation.workspaceId,
       evaluation.workspaceId,
-      (previous) => ({ kind: "existing", target: previous!.workspace }),
+      () => ({ kind: "evaluation", record: evaluation }),
     );
   }
+
   async appendAuditEvent(event: AuditEvent) {
     await this.hydrate();
     await this.commitMutation(
-      async (staged) => {
-        await staged.appendAuditEvent(event);
-      },
+      (staged) => staged.appendAuditEvent(event),
       () => event.workspaceId,
       event.workspaceId,
-      (previous) => ({ kind: "existing", target: previous!.workspace }),
+      () => ({ kind: "audit", record: event }),
     );
   }
+
   async exportSnapshot(
     workspaceId: string,
   ): Promise<WorkspaceSnapshot | DomainError> {
     await this.hydrate();
     return this.memory.exportSnapshot(workspaceId);
   }
+
+  async getReplacementTarget(
+    workspaceId: string,
+  ): Promise<WorkspaceReplacementTarget | DomainError> {
+    const db = await this.db();
+    const persisted = (await db.get("workspaces", workspaceId)) as
+      PersistedWorkspace | undefined;
+    if (!persisted)
+      return persistenceError(
+        "workspace_not_found",
+        "Workspace was not found.",
+      );
+    return {
+      workspace: domainWorkspace(persisted),
+      generation: persisted.persistenceGeneration ?? 0,
+    };
+  }
+
   async importSnapshot(
     snapshot: WorkspaceSnapshot,
     options: {
       replaceExisting?: boolean;
-      replacementTarget?: WorkspaceRecord;
+      replacementTarget?: WorkspaceReplacementTarget;
     } = {},
   ) {
     await this.hydrate();
     return this.commitMutation(
       async (staged) => {
-        const validation = await this.memory.validateSnapshot(
-          snapshot,
-          options,
+        const localTarget = await this.memory.getReplacementTarget(
+          snapshot.workspace.id,
         );
+        const validation = await this.memory.validateSnapshot(snapshot, {
+          replaceExisting: options.replaceExisting,
+          replacementTarget: "code" in localTarget ? undefined : localTarget,
+        });
         return validation ?? staged.loadValidatedSnapshot(snapshot, options);
       },
       (result) => ("code" in result ? undefined : result.workspace.id),

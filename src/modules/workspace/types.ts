@@ -28,6 +28,10 @@ export type WorkspaceRecord = {
   readonly updatedAt: string;
   readonly ephemeral: boolean;
 };
+export type WorkspaceReplacementTarget = {
+  readonly workspace: WorkspaceRecord;
+  readonly generation: number;
+};
 export type ArtifactRecord = {
   readonly id: string;
   readonly workspaceId: string;
@@ -107,11 +111,14 @@ export interface WorkspaceStore {
   recordEvaluationEvidence(evaluation: EvaluationRecord): Promise<void>;
   appendAuditEvent(event: AuditEvent): Promise<void>;
   exportSnapshot(workspaceId: string): Promise<WorkspaceSnapshot | DomainError>;
+  getReplacementTarget(
+    workspaceId: string,
+  ): Promise<WorkspaceReplacementTarget | DomainError>;
   importSnapshot(
     snapshot: WorkspaceSnapshot,
     options?: {
       replaceExisting?: boolean;
-      replacementTarget?: WorkspaceRecord;
+      replacementTarget?: WorkspaceReplacementTarget;
     },
   ): Promise<WorkspaceBundle | DomainError>;
 }

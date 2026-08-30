@@ -434,7 +434,7 @@ export function App({
       }
       result = await workspaceService.replaceSnapshot(
         json,
-        inspection.value.existingWorkspace!,
+        inspection.value.replacementTarget!,
       );
     } else {
       result = await workspaceService.importSnapshot(json);

@@ -13,6 +13,7 @@ import type {
   SkillRevision,
   WorkspaceBundle,
   WorkspaceRecord,
+  WorkspaceReplacementTarget,
   WorkspaceSnapshot,
   WorkspaceStore,
 } from "./types";
@@ -69,6 +70,7 @@ function deleteWorkspaceRecords<T extends { workspaceId: string }>(
 }
 
 export class MemoryWorkspaceStore implements WorkspaceStore {
+  private readonly generations = new Map<string, number>();
   protected readonly state: State = {
     workspaces: new Map(),
     revisions: new Map(),
@@ -123,6 +125,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     this.state.workspaces.set(id, workspace);
     this.state.revisions.set(id, [revision]);
     this.state.auditEvents.set(audit.id, audit);
+    this.bumpGeneration(id);
     return this.bundle(workspace, revision);
   }
 
@@ -207,17 +210,21 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       revision: revisionNumber,
       details: { baseRevision: input.baseRevision },
     });
+    this.bumpGeneration(workspace.id);
     return this.bundle(nextWorkspace, revision);
   }
 
   async putArtifact(artifact: ArtifactRecord): Promise<void> {
     this.state.artifacts.set(artifact.id, structuredClone(artifact));
+    this.bumpGeneration(artifact.workspaceId);
   }
   async recordEvaluationEvidence(evaluation: EvaluationRecord): Promise<void> {
     this.state.evaluations.set(evaluation.id, structuredClone(evaluation));
+    this.bumpGeneration(evaluation.workspaceId);
   }
   async appendAuditEvent(event: AuditEvent): Promise<void> {
     this.state.auditEvents.set(event.id, structuredClone(event));
+    this.bumpGeneration(event.workspaceId);
   }
 
   async exportSnapshot(
@@ -253,7 +260,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     snapshot: WorkspaceSnapshot,
     options: {
       replaceExisting?: boolean;
-      replacementTarget?: WorkspaceRecord;
+      replacementTarget?: WorkspaceReplacementTarget;
     } = {},
   ): Promise<WorkspaceBundle | DomainError> {
     const validation = await this.validateSnapshot(snapshot, options);
@@ -266,14 +273,19 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     snapshot: WorkspaceSnapshot,
     options: {
       replaceExisting?: boolean;
-      replacementTarget?: WorkspaceRecord;
+      replacementTarget?: WorkspaceReplacementTarget;
     } = {},
   ): Promise<DomainError | null> {
     const existingWorkspace = this.state.workspaces.get(snapshot.workspace.id);
     if (
       options.replaceExisting &&
       (!options.replacementTarget ||
-        !sameWorkspace(existingWorkspace, options.replacementTarget))
+        !sameWorkspace(
+          existingWorkspace,
+          options.replacementTarget.workspace,
+        ) ||
+        this.generations.get(snapshot.workspace.id) !==
+          options.replacementTarget.generation)
     )
       return domainError(
         "revision_conflict",
@@ -378,6 +390,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     snapshot.auditEvents.forEach((item) =>
       this.state.auditEvents.set(item.id, structuredClone(item)),
     );
+    this.bumpGeneration(snapshot.workspace.id);
     return this.bundle(
       snapshot.workspace,
       revisions.find(
@@ -390,13 +403,16 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     workspaceId: string,
     snapshot?: WorkspaceSnapshot,
   ): Promise<void> {
-    this.removeWorkspace(workspaceId);
     if (snapshot) {
-      const restored = await this.importSnapshot(snapshot, {
+      const target = await this.getReplacementTarget(workspaceId);
+      const validation = await this.validateSnapshot(snapshot, {
         replaceExisting: true,
+        replacementTarget: "code" in target ? undefined : target,
       });
-      if ("code" in restored) throw new Error(restored.message);
+      if (validation) throw new Error(validation.message);
     }
+    this.removeWorkspace(workspaceId);
+    if (snapshot) this.admitSnapshot(snapshot);
   }
 
   private removeWorkspace(workspaceId: string): void {
@@ -415,6 +431,25 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     );
     for (const hash of this.state.blobs.keys())
       if (!referencedHashes.has(hash)) this.state.blobs.delete(hash);
+  }
+
+  async getReplacementTarget(
+    workspaceId: string,
+  ): Promise<WorkspaceReplacementTarget | DomainError> {
+    const workspace = this.state.workspaces.get(workspaceId);
+    if (!workspace)
+      return domainError("workspace_not_found", "Workspace was not found.");
+    return {
+      workspace: structuredClone(workspace),
+      generation: this.generations.get(workspaceId) ?? 0,
+    };
+  }
+
+  private bumpGeneration(workspaceId: string): void {
+    this.generations.set(
+      workspaceId,
+      (this.generations.get(workspaceId) ?? 0) + 1,
+    );
   }
 
   protected async putBlob(content: string): Promise<string> {

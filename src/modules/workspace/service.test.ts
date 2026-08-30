@@ -133,9 +133,12 @@ describe("WorkspaceService", () => {
     if (!updated.ok) throw new Error(updated.error.message);
     const collision = await service.importSnapshot(exported.value);
     expect(collision.ok).toBe(false);
+    const inspection = await service.inspectSnapshotImport(exported.value);
+    if (!inspection.ok || !inspection.value.replacementTarget)
+      throw new Error("replacement target missing");
     const restored = await service.replaceSnapshot(
       exported.value,
-      updated.value.workspace,
+      inspection.value.replacementTarget,
     );
     expect(restored.ok).toBe(true);
     if (!restored.ok) return;
