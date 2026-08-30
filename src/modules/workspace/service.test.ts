@@ -149,6 +149,47 @@ describe("WorkspaceService", () => {
 });
 
 describe("WorkspaceService input validation", () => {
+  it("removes accepted load metrics when a map becomes proposed", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const map = {
+      revision: 1,
+      suppliedBy: "visiting-agent proposal",
+      status: "proposed",
+      scopes: [{ id: "root", label: "Root" }],
+      requirements: [],
+    } as const;
+    const accepted = await service.submitInstructionMap(
+      created.value.workspace.id,
+      map,
+      true,
+    );
+    if (!accepted.ok) throw new Error(accepted.error.message);
+    let current = await service.open(created.value.workspace.id);
+    if (!current.ok) throw new Error(current.error.message);
+    expect(
+      current.value.artifacts.some((item) => item.kind === "instruction-load"),
+    ).toBe(true);
+    const proposed = await service.submitInstructionMap(
+      created.value.workspace.id,
+      map,
+      false,
+    );
+    if (!proposed.ok) throw new Error(proposed.error.message);
+    current = await service.open(created.value.workspace.id);
+    if (!current.ok) throw new Error(current.error.message);
+    expect(
+      current.value.artifacts.some((item) => item.kind === "instruction-load"),
+    ).toBe(false);
+    expect(
+      (
+        current.value.artifacts.find((item) => item.kind === "instruction-map")
+          ?.data as any
+      ).status,
+    ).toBe("proposed");
+  });
+
   it("returns invalid_submission for malformed Skill input shapes", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const badSkill = await service.create({ skillMd: 42 as never });

@@ -69,6 +69,10 @@ function deleteWorkspaceRecords<T extends { workspaceId: string }>(
     if (record.workspaceId === workspaceId) records.delete(id);
 }
 
+function sameRecord(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 export class MemoryWorkspaceStore implements WorkspaceStore {
   private readonly generations = new Map<string, number>();
   protected readonly state: State = {
@@ -214,11 +218,63 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     return this.bundle(nextWorkspace, revision);
   }
 
-  async putArtifact(artifact: ArtifactRecord): Promise<void> {
-    this.state.artifacts.set(artifact.id, structuredClone(artifact));
-    this.bumpGeneration(artifact.workspaceId);
+  async putArtifact(
+    artifact: ArtifactRecord,
+    expectedContentHash: string,
+  ): Promise<void> {
+    await this.updateArtifacts({
+      workspaceId: artifact.workspaceId,
+      revision: artifact.revision,
+      expectedContentHash,
+      artifacts: [artifact],
+    });
   }
-  async recordEvaluationEvidence(evaluation: EvaluationRecord): Promise<void> {
+  async updateArtifacts(input: {
+    workspaceId: string;
+    revision: number;
+    expectedContentHash: string;
+    artifacts: readonly ArtifactRecord[];
+    deleteIds?: readonly string[];
+  }): Promise<void> {
+    this.requireEvidenceRevision(
+      input.workspaceId,
+      input.revision,
+      input.expectedContentHash,
+    );
+    for (const artifact of input.artifacts) {
+      const existing = this.state.artifacts.get(artifact.id);
+      if (
+        artifact.workspaceId !== input.workspaceId ||
+        artifact.revision !== input.revision ||
+        (existing && existing.workspaceId !== input.workspaceId)
+      )
+        throw new Error("Artifact evidence ownership changed.");
+    }
+    for (const id of input.deleteIds ?? []) {
+      const existing = this.state.artifacts.get(id);
+      if (existing && existing.workspaceId !== input.workspaceId)
+        throw new Error("Artifact evidence ownership changed.");
+    }
+    for (const id of input.deleteIds ?? []) this.state.artifacts.delete(id);
+    for (const artifact of input.artifacts)
+      this.state.artifacts.set(artifact.id, structuredClone(artifact));
+    this.bumpGeneration(input.workspaceId);
+  }
+  async recordEvaluationEvidence(
+    evaluation: EvaluationRecord,
+    expected?: EvaluationRecord,
+  ): Promise<void> {
+    this.requireEvidenceRevision(
+      evaluation.workspaceId,
+      evaluation.revision,
+      evaluation.contentHash,
+    );
+    const existing = this.state.evaluations.get(evaluation.id);
+    if (
+      (expected === undefined && existing !== undefined) ||
+      (expected !== undefined && !sameRecord(existing, expected))
+    )
+      throw new Error("Evaluation evidence changed in another operation.");
     this.state.evaluations.set(evaluation.id, structuredClone(evaluation));
     this.bumpGeneration(evaluation.workspaceId);
   }
@@ -450,6 +506,18 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       workspaceId,
       (this.generations.get(workspaceId) ?? 0) + 1,
     );
+  }
+
+  private requireEvidenceRevision(
+    workspaceId: string,
+    revision: number,
+    contentHash: string,
+  ): void {
+    const persisted = this.state.revisions
+      .get(workspaceId)
+      ?.find((record) => record.revision === revision);
+    if (!persisted || persisted.contentHash !== contentHash)
+      throw new Error("Evidence revision changed before it was saved.");
   }
 
   protected async putBlob(content: string): Promise<string> {

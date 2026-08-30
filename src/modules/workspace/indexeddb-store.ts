@@ -37,7 +37,13 @@ type PersistCondition =
       readonly kind: "replace";
       readonly target: WorkspaceReplacementTarget;
     }
-  | { readonly kind: "artifact"; readonly record: ArtifactRecord }
+  | {
+      readonly kind: "artifacts";
+      readonly records: readonly ArtifactRecord[];
+      readonly deleteIds: readonly string[];
+      readonly revision: number;
+      readonly expectedContentHash: string;
+    }
   | {
       readonly kind: "evaluation";
       readonly record: EvaluationRecord;
@@ -289,7 +295,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         "The saved workspace changed after replacement was confirmed.",
       );
     if (
-      condition.kind === "artifact" ||
+      condition.kind === "artifacts" ||
       condition.kind === "evaluation" ||
       condition.kind === "audit"
     ) {
@@ -299,32 +305,96 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
           "Workspace was not found.",
         );
       const storeName =
-        condition.kind === "artifact"
+        condition.kind === "artifacts"
           ? "artifacts"
           : condition.kind === "evaluation"
             ? "evaluations"
             : "auditEvents";
-      const existing = await transaction
-        .objectStore(storeName)
-        .get(condition.record.id);
-      if (existing && existing.workspaceId !== workspaceId)
+      const records =
+        condition.kind === "artifacts" ? condition.records : [condition.record];
+      if (
+        condition.kind === "artifacts" &&
+        records.some(
+          (record) =>
+            record.workspaceId !== workspaceId ||
+            record.revision !== condition.revision,
+        )
+      )
+        conflict = persistenceError(
+          "invalid_snapshot",
+          "Artifact evidence ownership changed.",
+        );
+      const existingRecords = await Promise.all(
+        records.map((record) =>
+          transaction.objectStore(storeName).get(record.id),
+        ),
+      );
+      if (
+        existingRecords.some(
+          (existing) => existing && existing.workspaceId !== workspaceId,
+        )
+      )
         conflict = persistenceError(
           "invalid_snapshot",
           `${condition.kind} id collides with existing data.`,
         );
+      if (condition.kind === "artifacts" || condition.kind === "evaluation") {
+        const revision =
+          condition.kind === "artifacts"
+            ? condition.revision
+            : condition.record.revision;
+        const expectedContentHash =
+          condition.kind === "artifacts"
+            ? condition.expectedContentHash
+            : condition.record.contentHash;
+        const persistedRevision = (await transaction
+          .objectStore("revisions")
+          .get(`${workspaceId}:${revision}`)) as PersistedRevision | undefined;
+        if (persistedRevision?.contentHash !== expectedContentHash)
+          conflict = persistenceError(
+            "revision_conflict",
+            "Evidence revision changed before it was saved.",
+          );
+      }
       if (
         condition.kind === "evaluation" &&
-        ((condition.expected === undefined && existing !== undefined) ||
+        ((condition.expected === undefined &&
+          existingRecords[0] !== undefined) ||
           (condition.expected !== undefined &&
-            !sameRecord(existing, condition.expected)))
+            !sameRecord(existingRecords[0], condition.expected)))
       )
         conflict = persistenceError(
           "revision_conflict",
           "Evaluation evidence changed in another browser tab.",
         );
       if (!conflict) {
+        if (condition.kind === "artifacts") {
+          const deleted = await Promise.all(
+            condition.deleteIds.map((id) =>
+              transaction.objectStore("artifacts").get(id),
+            ),
+          );
+          if (
+            deleted.some(
+              (existing) => existing && existing.workspaceId !== workspaceId,
+            )
+          ) {
+            await transaction.done;
+            return persistenceError(
+              "invalid_snapshot",
+              "Artifact evidence ownership changed.",
+            );
+          }
+        }
         await Promise.all([
-          transaction.objectStore(storeName).put(condition.record),
+          ...records.map((record) =>
+            transaction.objectStore(storeName).put(record),
+          ),
+          ...(condition.kind === "artifacts"
+            ? condition.deleteIds.map((id) =>
+                transaction.objectStore("artifacts").delete(id),
+              )
+            : []),
           workspaceStore.put({
             ...persistedWorkspace!,
             persistenceGeneration: generation + 1,
@@ -551,28 +621,50 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     );
   }
 
-  async putArtifact(artifact: ArtifactRecord) {
+  async putArtifact(artifact: ArtifactRecord, expectedContentHash: string) {
+    await this.updateArtifacts({
+      workspaceId: artifact.workspaceId,
+      revision: artifact.revision,
+      expectedContentHash,
+      artifacts: [artifact],
+    });
+  }
+
+  async updateArtifacts(input: {
+    workspaceId: string;
+    revision: number;
+    expectedContentHash: string;
+    artifacts: readonly ArtifactRecord[];
+    deleteIds?: readonly string[];
+  }) {
     await this.hydrate();
     await this.commitMutation(
-      (staged) => staged.putArtifact(artifact),
-      () => artifact.workspaceId,
-      artifact.workspaceId,
-      () => ({ kind: "artifact", record: artifact }),
+      (staged) => staged.updateArtifacts(input),
+      () => input.workspaceId,
+      input.workspaceId,
+      () => ({
+        kind: "artifacts",
+        records: input.artifacts,
+        deleteIds: input.deleteIds ?? [],
+        revision: input.revision,
+        expectedContentHash: input.expectedContentHash,
+      }),
     );
   }
 
-  async recordEvaluationEvidence(evaluation: EvaluationRecord) {
+  async recordEvaluationEvidence(
+    evaluation: EvaluationRecord,
+    expected?: EvaluationRecord,
+  ) {
     await this.hydrate();
     await this.commitMutation(
-      (staged) => staged.recordEvaluationEvidence(evaluation),
+      (staged) => staged.recordEvaluationEvidence(evaluation, expected),
       () => evaluation.workspaceId,
       evaluation.workspaceId,
-      (previous) => ({
+      () => ({
         kind: "evaluation",
         record: evaluation,
-        expected: previous?.evaluations.find(
-          (record) => record.id === evaluation.id,
-        ),
+        expected,
       }),
     );
   }

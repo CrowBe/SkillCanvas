@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IDBPDatabase } from "idb";
 import { EMPTY_SKILL } from "../skill";
+import { byteLength, sha256 } from "../shared";
 import { IndexedDbWorkspaceStore } from "./indexeddb-store";
 import { MemoryWorkspaceStore } from "./memory-store";
 import { createWorkspaceService } from "./service";
@@ -334,24 +335,30 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     });
     const second = new IndexedDbWorkspaceStore(control.database);
     await second.openWorkspace(created.workspace.id);
-    await first.putArtifact({
-      id: "artifact-first",
-      workspaceId: created.workspace.id,
-      revision: 1,
-      kind: "lint",
-      version: "1",
-      createdAt: new Date().toISOString(),
-      data: {},
-    });
-    await second.putArtifact({
-      id: "artifact-second",
-      workspaceId: created.workspace.id,
-      revision: 1,
-      kind: "structure",
-      version: "1",
-      createdAt: new Date().toISOString(),
-      data: {},
-    });
+    await first.putArtifact(
+      {
+        id: "artifact-first",
+        workspaceId: created.workspace.id,
+        revision: 1,
+        kind: "lint",
+        version: "1",
+        createdAt: new Date().toISOString(),
+        data: {},
+      },
+      created.revision.contentHash,
+    );
+    await second.putArtifact(
+      {
+        id: "artifact-second",
+        workspaceId: created.workspace.id,
+        revision: 1,
+        kind: "structure",
+        version: "1",
+        createdAt: new Date().toISOString(),
+        data: {},
+      },
+      created.revision.contentHash,
+    );
     const reader = new IndexedDbWorkspaceStore(control.database);
     const current = await reader.openWorkspace(created.workspace.id);
     expect(
@@ -373,15 +380,18 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     if ("code" in snapshot) throw new Error(snapshot.message);
     const confirmed = await replacementTarget(first, created.workspace.id);
     const second = new IndexedDbWorkspaceStore(control.database);
-    await second.putArtifact({
-      id: "new-evidence",
-      workspaceId: created.workspace.id,
-      revision: 1,
-      kind: "lint",
-      version: "1",
-      createdAt: new Date().toISOString(),
-      data: {},
-    });
+    await second.putArtifact(
+      {
+        id: "new-evidence",
+        workspaceId: created.workspace.id,
+        revision: 1,
+        kind: "lint",
+        version: "1",
+        createdAt: new Date().toISOString(),
+        data: {},
+      },
+      created.revision.contentHash,
+    );
     const rejected = await first.importSnapshot(snapshot, {
       replaceExisting: true,
       replacementTarget: confirmed,
@@ -403,27 +413,33 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       referenceFiles: [],
     });
     control.clearReadLog();
-    await store.putArtifact({
-      id: "targeted-artifact",
-      workspaceId: created.workspace.id,
-      revision: 1,
-      kind: "lint",
-      version: "1",
-      createdAt: new Date().toISOString(),
-      data: {},
-    });
+    await store.putArtifact(
+      {
+        id: "targeted-artifact",
+        workspaceId: created.workspace.id,
+        revision: 1,
+        kind: "lint",
+        version: "1",
+        createdAt: new Date().toISOString(),
+        data: {},
+      },
+      created.revision.contentHash,
+    );
     expect(control.transactionGetAlls).not.toContain("blobs");
     expect(control.databaseGetAlls).toEqual([]);
     control.clearReadLog();
-    await store.putArtifact({
-      id: "second-targeted-artifact",
-      workspaceId: created.workspace.id,
-      revision: 1,
-      kind: "structure",
-      version: "1",
-      createdAt: new Date().toISOString(),
-      data: {},
-    });
+    await store.putArtifact(
+      {
+        id: "second-targeted-artifact",
+        workspaceId: created.workspace.id,
+        revision: 1,
+        kind: "structure",
+        version: "1",
+        createdAt: new Date().toISOString(),
+        data: {},
+      },
+      created.revision.contentHash,
+    );
     expect(control.databaseGetAlls).toEqual([]);
     expect(control.transactionGetAlls).not.toContain("blobs");
   });
@@ -473,6 +489,92 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     expect((evaluation.data as any).observations[0].rationale).toBe(
       "First tab evidence",
     );
+  });
+
+  it("rejects concurrent evaluation updates through one store", async () => {
+    const control = databaseControl();
+    const service = createWorkspaceService(
+      new IndexedDbWorkspaceStore(control.database),
+    );
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const prepared = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const testCase = (prepared.value.data as any).cases[0];
+    const submissions = await Promise.allSettled([
+      service.submitEvaluation(created.value.workspace.id, prepared.value.id, {
+        caseId: testCase.id,
+        selectedChoiceId: testCase.choices[0].id,
+        rationale: "First concurrent submission",
+      }),
+      service.submitEvaluation(created.value.workspace.id, prepared.value.id, {
+        caseId: testCase.id,
+        selectedChoiceId: testCase.choices[1].id,
+        rationale: "Second concurrent submission",
+      }),
+    ]);
+    expect(
+      submissions.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      submissions.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
+    const current = await service.open(created.value.workspace.id);
+    if (!current.ok) throw new Error(current.error.message);
+    const evaluation = current.value.evaluations.find(
+      (record) => record.id === prepared.value.id,
+    )!;
+    expect((evaluation.data as any).observations).toHaveLength(1);
+  });
+
+  it("rejects stale artifacts after snapshot replacement", async () => {
+    const control = databaseControl();
+    const stale = new IndexedDbWorkspaceStore(control.database);
+    const created = await stale.createWorkspace({
+      name: "replaceable",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    const snapshot = await stale.exportSnapshot(created.workspace.id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    const replacementContent = `${EMPTY_SKILL}\nReplacement content.`;
+    const replacementHash = await sha256(replacementContent);
+    (snapshot.blobs as any[])[0] = {
+      hash: replacementHash,
+      content: replacementContent,
+      bytes: byteLength(replacementContent),
+    };
+    (snapshot.revisions[0] as { contentHash: string }).contentHash =
+      replacementHash;
+    const replacing = new IndexedDbWorkspaceStore(control.database);
+    const replaced = await replacing.importSnapshot(snapshot, {
+      replaceExisting: true,
+      replacementTarget: await replacementTarget(
+        replacing,
+        created.workspace.id,
+      ),
+    });
+    if ("code" in replaced) throw new Error(replaced.message);
+    await expect(
+      stale.putArtifact(
+        {
+          id: "stale-lint",
+          workspaceId: created.workspace.id,
+          revision: 1,
+          kind: "lint",
+          version: "1",
+          createdAt: new Date().toISOString(),
+          data: {},
+        },
+        created.revision.contentHash,
+      ),
+    ).rejects.toThrow("Evidence revision changed");
+    const reader = new IndexedDbWorkspaceStore(control.database);
+    const current = await reader.openWorkspace(created.workspace.id);
+    expect("code" in current ? [] : current.artifacts).toEqual([]);
   });
 });
 

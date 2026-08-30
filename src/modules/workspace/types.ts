@@ -107,8 +107,21 @@ export interface WorkspaceStore {
     referenceFiles?: readonly { path: string; content: string }[];
     actor: AuditEvent["actor"];
   }): Promise<WorkspaceBundle | DomainError>;
-  putArtifact(artifact: ArtifactRecord): Promise<void>;
-  recordEvaluationEvidence(evaluation: EvaluationRecord): Promise<void>;
+  putArtifact(
+    artifact: ArtifactRecord,
+    expectedContentHash: string,
+  ): Promise<void>;
+  updateArtifacts(input: {
+    workspaceId: string;
+    revision: number;
+    expectedContentHash: string;
+    artifacts: readonly ArtifactRecord[];
+    deleteIds?: readonly string[];
+  }): Promise<void>;
+  recordEvaluationEvidence(
+    evaluation: EvaluationRecord,
+    expected?: EvaluationRecord,
+  ): Promise<void>;
   appendAuditEvent(event: AuditEvent): Promise<void>;
   exportSnapshot(workspaceId: string): Promise<WorkspaceSnapshot | DomainError>;
   getReplacementTarget(

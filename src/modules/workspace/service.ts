@@ -183,19 +183,24 @@ export function createWorkspaceService(
       const bundle = await open(workspaceId);
       if (!bundle.ok) return bundle;
       const result: { lint?: LintArtifact; structure?: StructureArtifact } = {};
+      const artifacts: ArtifactRecord[] = [];
       if (capabilities.includes("lint")) {
         result.lint = analyzeLint(
           bundle.value.skillMd,
           bundle.value.referenceFiles.map((file) => file.path),
         );
-        await store.putArtifact(artifact(bundle.value, "lint", result.lint));
+        artifacts.push(artifact(bundle.value, "lint", result.lint));
       }
       if (capabilities.includes("structure")) {
         result.structure = analyzeStructure(bundle.value.skillMd);
-        await store.putArtifact(
-          artifact(bundle.value, "structure", result.structure),
-        );
+        artifacts.push(artifact(bundle.value, "structure", result.structure));
       }
+      await store.updateArtifacts({
+        workspaceId,
+        revision: bundle.value.revision.revision,
+        expectedContentHash: bundle.value.revision.contentHash,
+        artifacts,
+      });
       return ok(result);
     },
     async submitInstructionMap(workspaceId, map, accept) {
@@ -212,15 +217,22 @@ export function createWorkspaceService(
         status: accept ? "accepted" : "proposed",
         suppliedBy: "visiting-agent proposal",
       };
-      await store.putArtifact(
-        artifact(bundle.value, "instruction-map", acceptedMap),
+      const mapArtifact = artifact(
+        bundle.value,
+        "instruction-map",
+        acceptedMap,
       );
-      if (!accept) return ok({ map: acceptedMap });
-      const vector = instructionLoadVector(acceptedMap);
-      await store.putArtifact(
-        artifact(bundle.value, "instruction-load", vector),
-      );
-      return ok({ map: acceptedMap, vector });
+      const vector = accept ? instructionLoadVector(acceptedMap) : undefined;
+      await store.updateArtifacts({
+        workspaceId,
+        revision: bundle.value.revision.revision,
+        expectedContentHash: bundle.value.revision.contentHash,
+        artifacts: vector
+          ? [mapArtifact, artifact(bundle.value, "instruction-load", vector)]
+          : [mapArtifact],
+        deleteIds: vector ? [] : [artifactId(bundle.value, "instruction-load")],
+      });
+      return ok({ map: acceptedMap, ...(vector ? { vector } : {}) });
     },
     async compare(workspaceId, beforeRevision, afterRevision) {
       const before = await open(workspaceId, beforeRevision);
@@ -256,7 +268,10 @@ export function createWorkspaceService(
         lint: { before: summary(beforeLint), after: summary(afterLint) },
         evaluationReferences,
       };
-      await store.putArtifact(artifact(after.value, "compare", data));
+      await store.putArtifact(
+        artifact(after.value, "compare", data),
+        after.value.revision.contentHash,
+      );
       return ok(data);
     },
     async prepareEvaluation(workspaceId, kind, options) {
@@ -320,7 +335,7 @@ export function createWorkspaceService(
               )
             : err("invalid_submission", "Unsupported evaluation kind.");
       if (!result.ok) return result;
-      await store.recordEvaluationEvidence(result.value);
+      await store.recordEvaluationEvidence(result.value, evaluation);
       return result;
     },
     async invokeMock(workspaceId, evaluationId, input) {
@@ -333,7 +348,7 @@ export function createWorkspaceService(
         return err("evaluation_not_found", "Evaluation was not found.");
       const result = invokeMockTool(evaluation, input);
       if (!result.ok) return result;
-      await store.recordEvaluationEvidence(result.value.record);
+      await store.recordEvaluationEvidence(result.value.record, evaluation);
       return ok({
         evaluation: result.value.record,
         output: result.value.output,
@@ -457,7 +472,7 @@ function artifact(
   data: unknown,
 ): ArtifactRecord {
   return {
-    id: `${bundle.workspace.id}:${bundle.revision.revision}:${kind}`,
+    id: artifactId(bundle, kind),
     workspaceId: bundle.workspace.id,
     revision: bundle.revision.revision,
     kind,
@@ -465,6 +480,12 @@ function artifact(
     createdAt: new Date().toISOString(),
     data,
   };
+}
+function artifactId(
+  bundle: WorkspaceBundle,
+  kind: ArtifactRecord["kind"],
+): string {
+  return `${bundle.workspace.id}:${bundle.revision.revision}:${kind}`;
 }
 function parsedName(raw: string): string {
   const parsed = parseSkillMd(raw);
