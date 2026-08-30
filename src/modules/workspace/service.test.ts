@@ -190,6 +190,51 @@ describe("WorkspaceService input validation", () => {
     ).toBe("proposed");
   });
 
+  it("rejects incoherent imported instruction map and load pairs", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const submitted = await service.submitInstructionMap(
+      created.value.workspace.id,
+      {
+        revision: 1,
+        suppliedBy: "visiting-agent proposal",
+        status: "proposed",
+        scopes: [{ id: "root", label: "Root" }],
+        requirements: [],
+      },
+      true,
+    );
+    if (!submitted.ok) throw new Error(submitted.error.message);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    for (const mutate of [
+      (snapshot: any) => {
+        snapshot.artifacts.find(
+          (artifact: any) => artifact.kind === "instruction-map",
+        ).data.status = "proposed";
+      },
+      (snapshot: any) => {
+        snapshot.artifacts.find(
+          (artifact: any) => artifact.kind === "instruction-load",
+        ).data.totalAtomicRequirements += 1;
+      },
+      (snapshot: any) => {
+        snapshot.artifacts = snapshot.artifacts.filter(
+          (artifact: any) => artifact.kind !== "instruction-load",
+        );
+      },
+    ]) {
+      const snapshot = JSON.parse(exported.value);
+      mutate(snapshot);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(JSON.stringify(snapshot));
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
   it("returns invalid_submission for malformed Skill input shapes", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const badSkill = await service.create({ skillMd: 42 as never });

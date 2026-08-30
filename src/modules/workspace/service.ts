@@ -199,6 +199,7 @@ export function createWorkspaceService(
         workspaceId,
         revision: bundle.value.revision.revision,
         expectedContentHash: bundle.value.revision.contentHash,
+        expectedGeneration: bundle.value.evidenceGeneration,
         artifacts,
       });
       return ok(result);
@@ -227,6 +228,7 @@ export function createWorkspaceService(
         workspaceId,
         revision: bundle.value.revision.revision,
         expectedContentHash: bundle.value.revision.contentHash,
+        expectedGeneration: bundle.value.evidenceGeneration,
         artifacts: vector
           ? [mapArtifact, artifact(bundle.value, "instruction-load", vector)]
           : [mapArtifact],
@@ -271,6 +273,7 @@ export function createWorkspaceService(
       await store.putArtifact(
         artifact(after.value, "compare", data),
         after.value.revision.contentHash,
+        after.value.evidenceGeneration,
       );
       return ok(data);
     },
@@ -852,6 +855,46 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       return err(
         "invalid_snapshot",
         `Artifact ${artifact.id} has invalid data: ${artifactIssue}`,
+      );
+  }
+  for (const revision of snapshot.revisions) {
+    const maps = snapshot.artifacts.filter(
+      (artifact) =>
+        artifact.revision === revision.revision &&
+        artifact.kind === "instruction-map",
+    );
+    const loads = snapshot.artifacts.filter(
+      (artifact) =>
+        artifact.revision === revision.revision &&
+        artifact.kind === "instruction-load",
+    );
+    if (maps.length > 1 || loads.length > 1)
+      return err(
+        "invalid_snapshot",
+        `Revision ${revision.revision} contains duplicate instruction artifacts.`,
+      );
+    const map = maps[0]?.data as InstructionMap | undefined;
+    if (map?.status !== "accepted") {
+      if (loads.length > 0)
+        return err(
+          "invalid_snapshot",
+          `Revision ${revision.revision} contains instruction-load metrics without an accepted map.`,
+        );
+      continue;
+    }
+    if (loads.length !== 1)
+      return err(
+        "invalid_snapshot",
+        `Revision ${revision.revision} is missing instruction-load metrics for its accepted map.`,
+      );
+    const expected = instructionLoadVector(map);
+    const received = loads[0].data as Record<string, unknown>;
+    if (
+      Object.entries(expected).some(([key, value]) => received[key] !== value)
+    )
+      return err(
+        "invalid_snapshot",
+        `Revision ${revision.revision} contains instruction-load metrics that do not match its accepted map.`,
       );
   }
   for (const event of snapshot.auditEvents) {

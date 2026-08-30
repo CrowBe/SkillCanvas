@@ -214,18 +214,19 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       revision: revisionNumber,
       details: { baseRevision: input.baseRevision },
     });
-    this.bumpGeneration(workspace.id);
     return this.bundle(nextWorkspace, revision);
   }
 
   async putArtifact(
     artifact: ArtifactRecord,
     expectedContentHash: string,
+    expectedGeneration: number,
   ): Promise<void> {
     await this.updateArtifacts({
       workspaceId: artifact.workspaceId,
       revision: artifact.revision,
       expectedContentHash,
+      expectedGeneration,
       artifacts: [artifact],
     });
   }
@@ -233,9 +234,15 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     workspaceId: string;
     revision: number;
     expectedContentHash: string;
+    expectedGeneration: number;
     artifacts: readonly ArtifactRecord[];
     deleteIds?: readonly string[];
   }): Promise<void> {
+    if (
+      (this.generations.get(input.workspaceId) ?? 0) !==
+      input.expectedGeneration
+    )
+      throw new Error("Workspace evidence changed before it was saved.");
     this.requireEvidenceRevision(
       input.workspaceId,
       input.revision,
@@ -419,13 +426,16 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
 
   loadValidatedSnapshot(
     snapshot: WorkspaceSnapshot,
-    options: { replaceExisting?: boolean } = {},
+    options: { replaceExisting?: boolean; generation?: number } = {},
   ): WorkspaceBundle {
     if (options.replaceExisting) this.removeWorkspace(snapshot.workspace.id);
-    return this.admitSnapshot(snapshot);
+    return this.admitSnapshot(snapshot, options.generation);
   }
 
-  private admitSnapshot(snapshot: WorkspaceSnapshot): WorkspaceBundle {
+  private admitSnapshot(
+    snapshot: WorkspaceSnapshot,
+    generation?: number,
+  ): WorkspaceBundle {
     const revisions = [...snapshot.revisions].sort(
       (a, b) => a.revision - b.revision,
     );
@@ -446,7 +456,8 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     snapshot.auditEvents.forEach((item) =>
       this.state.auditEvents.set(item.id, structuredClone(item)),
     );
-    this.bumpGeneration(snapshot.workspace.id);
+    if (generation === undefined) this.bumpGeneration(snapshot.workspace.id);
+    else this.generations.set(snapshot.workspace.id, generation);
     return this.bundle(
       snapshot.workspace,
       revisions.find(
@@ -540,6 +551,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
   ): WorkspaceBundle {
     const skillMd = this.state.blobs.get(revision.contentHash)!.content;
     return {
+      evidenceGeneration: this.generations.get(workspace.id) ?? 0,
       workspace: structuredClone(workspace),
       revision: structuredClone(revision),
       skillMd,

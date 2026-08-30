@@ -43,6 +43,7 @@ type PersistCondition =
       readonly deleteIds: readonly string[];
       readonly revision: number;
       readonly expectedContentHash: string;
+      readonly expectedGeneration: number;
     }
   | {
       readonly kind: "evaluation";
@@ -183,7 +184,9 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
           (item) => item.workspaceId === workspace.id,
         ),
       };
-      await this.memory.importSnapshot(snapshot);
+      this.memory.loadValidatedSnapshot(snapshot, {
+        generation: persisted.persistenceGeneration ?? 0,
+      });
     }
     this.hydrated = true;
   }
@@ -227,7 +230,10 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         evaluations,
         auditEvents,
       },
-      { replaceExisting: true },
+      {
+        replaceExisting: true,
+        generation: persisted.persistenceGeneration ?? 0,
+      },
     );
     return true;
   }
@@ -303,6 +309,14 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         conflict = persistenceError(
           "workspace_not_found",
           "Workspace was not found.",
+        );
+      if (
+        condition.kind === "artifacts" &&
+        generation !== condition.expectedGeneration
+      )
+        conflict = persistenceError(
+          "revision_conflict",
+          "Workspace evidence changed before it was saved.",
         );
       const storeName =
         condition.kind === "artifacts"
@@ -566,7 +580,13 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         : undefined;
       const prior = previous && !("code" in previous) ? previous : undefined;
       const staged = new MemoryWorkspaceStore();
-      if (prior) staged.loadValidatedSnapshot(prior);
+      if (prior) {
+        const priorBundle = await this.memory.openWorkspace(targetWorkspaceId!);
+        staged.loadValidatedSnapshot(prior, {
+          generation:
+            "code" in priorBundle ? undefined : priorBundle.evidenceGeneration,
+        });
+      }
       const result = await operation(staged);
       const id = workspaceId(result);
       if (id === undefined) return result;
@@ -580,7 +600,10 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       if (plan.kind === "create" || plan.kind === "replace") {
         const committed = await staged.exportSnapshot(id);
         if ("code" in committed) throw new Error(committed.message);
-        this.memory.loadValidatedSnapshot(committed, { replaceExisting: true });
+        this.memory.loadValidatedSnapshot(committed, {
+          replaceExisting: true,
+          generation: plan.kind === "create" ? 1 : plan.target.generation + 1,
+        });
       } else {
         await this.refreshWorkspace(id);
       }
@@ -621,11 +644,16 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     );
   }
 
-  async putArtifact(artifact: ArtifactRecord, expectedContentHash: string) {
+  async putArtifact(
+    artifact: ArtifactRecord,
+    expectedContentHash: string,
+    expectedGeneration: number,
+  ) {
     await this.updateArtifacts({
       workspaceId: artifact.workspaceId,
       revision: artifact.revision,
       expectedContentHash,
+      expectedGeneration,
       artifacts: [artifact],
     });
   }
@@ -634,6 +662,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     workspaceId: string;
     revision: number;
     expectedContentHash: string;
+    expectedGeneration: number;
     artifacts: readonly ArtifactRecord[];
     deleteIds?: readonly string[];
   }) {
@@ -648,6 +677,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         deleteIds: input.deleteIds ?? [],
         revision: input.revision,
         expectedContentHash: input.expectedContentHash,
+        expectedGeneration: input.expectedGeneration,
       }),
     );
   }

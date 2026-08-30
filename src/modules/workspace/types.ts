@@ -65,6 +65,7 @@ export type EvaluationRecord = {
   readonly data: unknown;
 };
 export type WorkspaceBundle = {
+  readonly evidenceGeneration: number;
   readonly workspace: WorkspaceRecord;
   readonly revision: SkillRevision;
   readonly skillMd: string;
@@ -110,11 +111,13 @@ export interface WorkspaceStore {
   putArtifact(
     artifact: ArtifactRecord,
     expectedContentHash: string,
+    expectedGeneration: number,
   ): Promise<void>;
   updateArtifacts(input: {
     workspaceId: string;
     revision: number;
     expectedContentHash: string;
+    expectedGeneration: number;
     artifacts: readonly ArtifactRecord[];
     deleteIds?: readonly string[];
   }): Promise<void>;

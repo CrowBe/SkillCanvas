@@ -346,7 +346,25 @@ describe("IndexedDbWorkspaceStore transactions", () => {
         data: {},
       },
       created.revision.contentHash,
+      created.evidenceGeneration,
     );
+    await expect(
+      second.putArtifact(
+        {
+          id: "artifact-second",
+          workspaceId: created.workspace.id,
+          revision: 1,
+          kind: "structure",
+          version: "1",
+          createdAt: new Date().toISOString(),
+          data: {},
+        },
+        created.revision.contentHash,
+        created.evidenceGeneration,
+      ),
+    ).rejects.toThrow("Workspace evidence changed");
+    const refreshed = await second.openWorkspace(created.workspace.id);
+    if ("code" in refreshed) throw new Error(refreshed.message);
     await second.putArtifact(
       {
         id: "artifact-second",
@@ -358,6 +376,7 @@ describe("IndexedDbWorkspaceStore transactions", () => {
         data: {},
       },
       created.revision.contentHash,
+      refreshed.evidenceGeneration,
     );
     const reader = new IndexedDbWorkspaceStore(control.database);
     const current = await reader.openWorkspace(created.workspace.id);
@@ -391,6 +410,7 @@ describe("IndexedDbWorkspaceStore transactions", () => {
         data: {},
       },
       created.revision.contentHash,
+      confirmed.generation,
     );
     const rejected = await first.importSnapshot(snapshot, {
       replaceExisting: true,
@@ -424,10 +444,12 @@ describe("IndexedDbWorkspaceStore transactions", () => {
         data: {},
       },
       created.revision.contentHash,
+      created.evidenceGeneration,
     );
     expect(control.transactionGetAlls).not.toContain("blobs");
     expect(control.databaseGetAlls).toEqual([]);
     control.clearReadLog();
+    const target = await replacementTarget(store, created.workspace.id);
     await store.putArtifact(
       {
         id: "second-targeted-artifact",
@@ -439,6 +461,7 @@ describe("IndexedDbWorkspaceStore transactions", () => {
         data: {},
       },
       created.revision.contentHash,
+      target.generation,
     );
     expect(control.databaseGetAlls).toEqual([]);
     expect(control.transactionGetAlls).not.toContain("blobs");
@@ -570,10 +593,46 @@ describe("IndexedDbWorkspaceStore transactions", () => {
           data: {},
         },
         created.revision.contentHash,
+        created.evidenceGeneration,
       ),
-    ).rejects.toThrow("Evidence revision changed");
+    ).rejects.toThrow(/Evidence revision changed|Workspace evidence changed/);
     const reader = new IndexedDbWorkspaceStore(control.database);
     const current = await reader.openWorkspace(created.workspace.id);
+    expect("code" in current ? [] : current.artifacts).toEqual([]);
+  });
+
+  it("rejects computed artifacts after any consumed workspace input changes", async () => {
+    const control = databaseControl();
+    const staleStore = new IndexedDbWorkspaceStore(control.database);
+    const staleService = createWorkspaceService(staleStore);
+    const created = await staleService.create({
+      name: "references",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [{ path: "references/a.md", content: "old" }],
+    });
+    if (!created.ok) throw new Error(created.error.message);
+    const exported = await staleService.exportSnapshot(
+      created.value.workspace.id,
+    );
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    snapshot.revisions[0].references = [];
+    snapshot.blobs = snapshot.blobs.filter(
+      (blob: any) => blob.hash === snapshot.revisions[0].contentHash,
+    );
+    const replacing = new IndexedDbWorkspaceStore(control.database);
+    const replaced = await replacing.importSnapshot(snapshot, {
+      replaceExisting: true,
+      replacementTarget: await replacementTarget(
+        replacing,
+        created.value.workspace.id,
+      ),
+    });
+    if ("code" in replaced) throw new Error(replaced.message);
+    await expect(
+      staleService.analyze(created.value.workspace.id, ["lint"]),
+    ).rejects.toThrow("Workspace evidence changed");
+    const current = await replacing.openWorkspace(created.value.workspace.id);
     expect("code" in current ? [] : current.artifacts).toEqual([]);
   });
 });

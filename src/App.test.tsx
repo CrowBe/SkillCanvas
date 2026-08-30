@@ -170,4 +170,84 @@ describe("App WebMCP registration lifecycle", () => {
       await screen.findByText(/Action failed: analysis quota exhausted/),
     ).toBeInTheDocument();
   });
+
+  it("selects the newest evaluation independently of storage order", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ name: "Evaluation order" });
+    if (!created.ok) throw new Error(created.error.message);
+    const triggering = await source.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    const testRun = await source.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      {
+        contract: {
+          name: "read_feedback",
+          description: "mock",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object" },
+          mockOutput: {},
+        },
+      },
+    );
+    if (!triggering.ok || !testRun.ok)
+      throw new Error("evaluation preparation failed");
+    const exported = await source.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const older = snapshot.evaluations.find(
+      (evaluation: any) => evaluation.kind === "triggering",
+    );
+    const newer = snapshot.evaluations.find(
+      (evaluation: any) => evaluation.kind === "test-run",
+    );
+    older.createdAt = older.updatedAt = "2026-01-01T00:00:00.000Z";
+    newer.createdAt = newer.updatedAt = "2026-02-01T00:00:00.000Z";
+    snapshot.evaluations = [newer, older];
+    const target = createWorkspaceService(new MemoryWorkspaceStore());
+    const imported = await target.importSnapshot(JSON.stringify(snapshot));
+    if (!imported.ok) throw new Error(imported.error.message);
+    const { App } = await import("./App");
+    render(<App workspaceService={target} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Evaluation order Revision 1/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Evals/ }));
+    expect(
+      await screen.findByRole("button", { name: "Manual mock invocation" }),
+    ).toBeInTheDocument();
+  });
+
+  it("unregisters a run-scoped mock after UI completion", async () => {
+    let mockSignal: AbortSignal | undefined;
+    document.modelContext = {
+      async registerTool(tool, options) {
+        if (tool.name.startsWith("mock_")) mockSignal = options?.signal;
+        return undefined;
+      },
+    };
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await workspaceService.create({ name: "Mock lifecycle" });
+    if (!created.ok) throw new Error(created.error.message);
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Mock lifecycle Revision 1/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Evals/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Prepare mocked test run" }),
+    );
+    await screen.findByText(/Mock tool registered as mock_read_feedback_/);
+    expect(mockSignal?.aborted).toBe(false);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Submit final output" }),
+    );
+    await screen.findByText("Deterministic contract checks complete.");
+    expect(mockSignal?.aborted).toBe(true);
+  });
 });

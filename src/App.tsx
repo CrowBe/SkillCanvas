@@ -207,7 +207,16 @@ export function App({
       (next.artifacts.find((item) => item.kind === "compare")?.data as
         CompareArtifact | undefined) ?? null,
     );
-    setEvaluation(next.evaluations.at(-1) ?? null);
+    setEvaluation(
+      [...next.evaluations]
+        .sort(
+          (left, right) =>
+            left.updatedAt.localeCompare(right.updatedAt) ||
+            left.createdAt.localeCompare(right.createdAt) ||
+            left.id.localeCompare(right.id),
+        )
+        .at(-1) ?? null,
+    );
     setStatus(`Revision ${next.revision.revision} loaded`);
     setInstructionJson((current) =>
       current.replace(
@@ -362,6 +371,7 @@ export function App({
       { finalOutput: parsed },
     );
     if (result.ok) {
+      registrationRef.current?.unregisterMockForRun(result.value.id);
       setEvaluation(result.value);
       setStatus("Deterministic contract checks complete.");
     } else setStatus(result.error.message);

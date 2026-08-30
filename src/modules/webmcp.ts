@@ -487,6 +487,7 @@ export async function registerWebMcpTools(
   tools: readonly WebMcpTool[];
   dispose(): void;
   registerMock(evaluationId: string, contractName: string): Promise<string>;
+  unregisterMockForRun(evaluationId: string): void;
 }> {
   const controller = new AbortController();
   const mockControllers = new Map<string, AbortController>();
@@ -563,6 +564,7 @@ export async function registerWebMcpTools(
       tools,
       dispose: () => controller.abort(),
       registerMock,
+      unregisterMockForRun: unregisterMock,
     };
   try {
     await Promise.all(
@@ -582,6 +584,7 @@ export async function registerWebMcpTools(
       mockControllers.forEach((item) => item.abort());
     },
     registerMock,
+    unregisterMockForRun: unregisterMock,
   };
 }
 
