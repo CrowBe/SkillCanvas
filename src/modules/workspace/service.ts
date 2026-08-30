@@ -12,13 +12,16 @@ import {
   type InstructionMap,
 } from "../instruction-map";
 import {
+  deterministicContractChecks,
   invokeMockTool,
   schemaSubsetError,
   prepareTestRun,
   prepareTriggering,
   submitTestRun,
   submitTriggering,
+  type ContractCheck,
   type JsonSchema,
+  type TestRunData,
   type ToolContract,
 } from "../evaluations";
 import {
@@ -724,7 +727,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   const snapshot = value as Partial<WorkspaceSnapshot>;
   if (
     snapshot.snapshotVersion !== 1 ||
-    typeof snapshot.exportedAt !== "string" ||
+    !isCanonicalUtcTimestamp(snapshot.exportedAt) ||
     workspaceRecordError(snapshot.workspace) !== null ||
     !Array.isArray(snapshot.revisions) ||
     !Array.isArray(snapshot.blobs) ||
@@ -792,6 +795,15 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         "invalid_snapshot",
         `Revision ${revision.revision} contains invalid Skill content: ${validated.error.message}`,
       );
+    if (
+      references.some(
+        (reference, index) => reference.path !== validated.value[index]?.path,
+      )
+    )
+      return err(
+        "invalid_snapshot",
+        `Revision ${revision.revision} contains a noncanonical reference path.`,
+      );
   }
   const revisionsByNumber = new Map(
     snapshot.revisions.map((revision) => [revision.revision, revision]),
@@ -844,6 +856,15 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       return err(
         "invalid_snapshot",
         `Artifact ${artifact.id} is not linked to an imported revision.`,
+      );
+    if (
+      (artifact.kind === "instruction-map" ||
+        artifact.kind === "instruction-load") &&
+      artifact.id !== `${workspace.id}:${artifact.revision}:${artifact.kind}`
+    )
+      return err(
+        "invalid_snapshot",
+        `Artifact ${artifact.id} does not use its canonical singleton id.`,
       );
     const artifactIssue = artifactDataError(
       artifact.kind,
@@ -984,7 +1005,7 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
         typeof observation.rationale !== "string" ||
         typeof observation.passed !== "boolean" ||
         observation.suppliedBy !== "visiting browser agent" ||
-        typeof observation.submittedAt !== "string"
+        !isCanonicalUtcTimestamp(observation.submittedAt)
       )
         return "a triggering observation is incomplete.";
       else {
@@ -1025,7 +1046,7 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
       if (!isSchemaObject(step)) return "a transcript step must be an object.";
       if (step.kind !== "tool-call" && step.kind !== "tool-result")
         return "a transcript step has an unsupported kind.";
-      if (typeof step.tool !== "string" || typeof step.at !== "string")
+      if (typeof step.tool !== "string" || !isCanonicalUtcTimestamp(step.at))
         return "a transcript step requires tool and timestamp fields.";
       if (step.kind === "tool-call" ? !("input" in step) : !("output" in step))
         return `a ${step.kind} transcript step is incomplete.`;
@@ -1042,6 +1063,14 @@ function evaluationDataError(kind: unknown, data: unknown): string | null {
           check.deterministic !== true
         )
           return "a test-run check is incomplete.";
+      if (!("finalOutput" in record))
+        return "test-run checks require final output evidence.";
+      const expected = deterministicContractChecks(
+        record as unknown as TestRunData,
+        record.finalOutput,
+      );
+      if (!contractChecksMatch(record.checks, expected))
+        return "test-run checks do not match the deterministic evidence.";
     }
     return null;
   }
@@ -1096,8 +1125,8 @@ function evaluationRecordError(value: unknown): string | null {
     typeof value.kind !== "string" ||
     !["prepared", "in-progress", "complete"].includes(value.status as string) ||
     !isStringRecord(value.versions) ||
-    typeof value.createdAt !== "string" ||
-    typeof value.updatedAt !== "string"
+    !isCanonicalUtcTimestamp(value.createdAt) ||
+    !isCanonicalUtcTimestamp(value.updatedAt)
   )
     return "required metadata is missing.";
   return null;
@@ -1109,8 +1138,8 @@ function workspaceRecordError(value: unknown): string | null {
     typeof value.id !== "string" ||
     typeof value.name !== "string" ||
     !Number.isInteger(value.currentRevision) ||
-    typeof value.createdAt !== "string" ||
-    typeof value.updatedAt !== "string" ||
+    !isCanonicalUtcTimestamp(value.createdAt) ||
+    !isCanonicalUtcTimestamp(value.updatedAt) ||
     typeof value.ephemeral !== "boolean"
   )
     return "workspace metadata is incomplete.";
@@ -1126,7 +1155,7 @@ function revisionRecordError(value: unknown): string | null {
       !Number.isInteger(value.parentRevision)) ||
     typeof value.contentHash !== "string" ||
     !Array.isArray(value.references) ||
-    typeof value.timestamp !== "string" ||
+    !isCanonicalUtcTimestamp(value.timestamp) ||
     typeof value.rulesetVersion !== "string"
   )
     return "revision metadata is incomplete.";
@@ -1293,7 +1322,7 @@ function artifactRecordError(value: unknown): string | null {
       "compare",
     ].includes(value.kind as string) ||
     typeof value.version !== "string" ||
-    typeof value.createdAt !== "string" ||
+    !isCanonicalUtcTimestamp(value.createdAt) ||
     !("data" in value)
   )
     return "required metadata is missing.";
@@ -1305,7 +1334,7 @@ function auditEventError(value: unknown): string | null {
   if (
     typeof value.id !== "string" ||
     typeof value.workspaceId !== "string" ||
-    typeof value.at !== "string" ||
+    !isCanonicalUtcTimestamp(value.at) ||
     !["human", "webmcp", "system"].includes(value.actor as string) ||
     typeof value.action !== "string" ||
     (value.revision !== undefined && !Number.isInteger(value.revision)) ||
@@ -1313,4 +1342,31 @@ function auditEventError(value: unknown): string | null {
   )
     return "required metadata is missing.";
   return null;
+}
+
+function isCanonicalUtcTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const instant = new Date(value);
+  return !Number.isNaN(instant.getTime()) && instant.toISOString() === value;
+}
+
+function contractChecksMatch(
+  received: readonly unknown[],
+  expected: readonly ContractCheck[],
+): boolean {
+  return (
+    received.length === expected.length &&
+    received.every((value, index) => {
+      if (!isSchemaObject(value)) return false;
+      const canonical = expected[index];
+      return (
+        canonical !== undefined &&
+        Object.keys(value).length === 4 &&
+        value.id === canonical.id &&
+        value.passed === canonical.passed &&
+        value.message === canonical.message &&
+        value.deterministic === canonical.deterministic
+      );
+    })
+  );
 }

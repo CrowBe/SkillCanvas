@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  INSTRUCTION_MAP_MAX_DEPTH,
+  INSTRUCTION_MAP_MAX_REQUIREMENTS,
   instructionLoadVector,
   validateInstructionMap,
   type InstructionMap,
@@ -129,5 +131,52 @@ describe("instruction map validation", () => {
     const result = validateInstructionMap(cyclic, raw, 1);
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.error.message).toContain("cycle");
+  });
+
+  it("bounds map cardinality and dependency depth", () => {
+    const requirement = (index: number) => ({
+      id: `r-${index}`,
+      sourceSpan: { start: 0, end: 3 },
+      statement: "one",
+      kind: "action" as const,
+      scopeId: "root",
+      dependencies: index === 0 ? [] : [`r-${index - 1}`],
+      verifiability: "deterministic" as const,
+    });
+    const atDepthLimit: InstructionMap = {
+      ...base,
+      scopes: [{ id: "root", label: "Root" }],
+      requirements: Array.from(
+        { length: INSTRUCTION_MAP_MAX_DEPTH },
+        (_, index) => requirement(index),
+      ),
+    };
+    expect(validateInstructionMap(atDepthLimit, raw, 1).ok).toBe(true);
+    expect(
+      validateInstructionMap(
+        {
+          ...atDepthLimit,
+          requirements: [
+            ...atDepthLimit.requirements,
+            requirement(INSTRUCTION_MAP_MAX_DEPTH),
+          ],
+        },
+        raw,
+        1,
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateInstructionMap(
+        {
+          ...atDepthLimit,
+          requirements: Array.from(
+            { length: INSTRUCTION_MAP_MAX_REQUIREMENTS + 1 },
+            (_, index) => ({ ...requirement(index), dependencies: [] }),
+          ),
+        },
+        raw,
+        1,
+      ).ok,
+    ).toBe(false);
   });
 });

@@ -49,6 +49,10 @@ const VERIFIABILITIES: readonly string[] = [
   "semantic-judgment",
   "unverified",
 ];
+export const INSTRUCTION_MAP_MAX_SCOPES = 1000;
+export const INSTRUCTION_MAP_MAX_REQUIREMENTS = 1000;
+export const INSTRUCTION_MAP_MAX_DEPENDENCIES_PER_REQUIREMENT = 100;
+export const INSTRUCTION_MAP_MAX_DEPTH = 100;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,6 +73,14 @@ function checkShape(input: unknown): Result<InstructionMap> {
   if (!Array.isArray(input.scopes) || !Array.isArray(input.requirements))
     return shapeError(
       "Instruction map requires scopes and requirements arrays.",
+    );
+  if (input.scopes.length > INSTRUCTION_MAP_MAX_SCOPES)
+    return shapeError(
+      `Instruction maps may contain at most ${INSTRUCTION_MAP_MAX_SCOPES} scopes.`,
+    );
+  if (input.requirements.length > INSTRUCTION_MAP_MAX_REQUIREMENTS)
+    return shapeError(
+      `Instruction maps may contain at most ${INSTRUCTION_MAP_MAX_REQUIREMENTS} requirements.`,
     );
   for (const scope of input.scopes) {
     if (!isRecord(scope) || typeof scope.id !== "string" || scope.id === "")
@@ -99,6 +111,11 @@ function checkShape(input: unknown): Result<InstructionMap> {
       requirement.dependencies.some((item) => typeof item !== "string")
     )
       return shapeError(`Requirement ${label} has invalid dependencies.`);
+    if (
+      requirement.dependencies.length >
+      INSTRUCTION_MAP_MAX_DEPENDENCIES_PER_REQUIREMENT
+    )
+      return shapeError(`Requirement ${label} has too many dependencies.`);
     const span = requirement.sourceSpan;
     if (
       !isRecord(span) ||
@@ -152,6 +169,11 @@ export function validateInstructionMap(
           `Scope hierarchy contains a cycle at ${parentId}.`,
         );
       seen.add(parentId);
+      if (seen.size > INSTRUCTION_MAP_MAX_DEPTH)
+        return err(
+          "invalid_instruction_map",
+          `Scope hierarchy exceeds depth ${INSTRUCTION_MAP_MAX_DEPTH}.`,
+        );
       parentId = parents.get(parentId);
     }
   }
@@ -193,6 +215,11 @@ export function validateInstructionMap(
       "invalid_instruction_map",
       "Instruction dependencies must be acyclic.",
     );
+  if (maximumDependencyDepth(map.requirements) > INSTRUCTION_MAP_MAX_DEPTH)
+    return err(
+      "invalid_instruction_map",
+      `Instruction dependencies exceed depth ${INSTRUCTION_MAP_MAX_DEPTH}.`,
+    );
   return ok(map);
 }
 
@@ -212,13 +239,14 @@ export function instructionLoadVector(
     }
     return value;
   };
-  const chain = (id: string, memo = new Map<string, number>()): number => {
-    if (memo.has(id)) return memo.get(id)!;
+  const chainMemo = new Map<string, number>();
+  const chain = (id: string): number => {
+    if (chainMemo.has(id)) return chainMemo.get(id)!;
     const item = requirements.get(id);
     const value = item?.dependencies.length
-      ? 1 + Math.max(...item.dependencies.map((dep) => chain(dep, memo)))
+      ? 1 + Math.max(...item.dependencies.map((dep) => chain(dep)))
       : 1;
-    memo.set(id, value);
+    chainMemo.set(id, value);
     return value;
   };
   const statements = new Map<string, number>();
@@ -230,16 +258,25 @@ export function instructionLoadVector(
       (dep) => requirements.get(dep)?.scopeId !== item.scopeId,
     ).length;
   }
-  const conflictPairs = new Set<string>();
-  for (const a of map.requirements)
-    for (const b of map.requirements) {
-      if (a.id >= b.id || a.scopeId !== b.scopeId) continue;
-      if (
-        a.statement.toLowerCase() === b.statement.toLowerCase() &&
-        (a.kind === "prohibition") !== (b.kind === "prohibition")
-      )
-        conflictPairs.add(`${a.id}:${b.id}`);
-    }
+  const conflictGroups = new Map<
+    string,
+    { prohibitions: number; permissions: number }
+  >();
+  const requirementsByScope = new Map<string, number>();
+  for (const item of map.requirements) {
+    const key = `${item.scopeId}\0${item.statement.toLowerCase()}`;
+    const group = conflictGroups.get(key) ?? {
+      prohibitions: 0,
+      permissions: 0,
+    };
+    if (item.kind === "prohibition") group.prohibitions += 1;
+    else group.permissions += 1;
+    conflictGroups.set(key, group);
+    requirementsByScope.set(
+      item.scopeId,
+      (requirementsByScope.get(item.scopeId) ?? 0) + 1,
+    );
+  }
   const ancestors = (scopeId: string) => {
     const ids = new Set<string>();
     let current = scopes.get(scopeId);
@@ -253,10 +290,19 @@ export function instructionLoadVector(
     0,
     ...map.scopes.map((scope) => {
       const pathScopes = ancestors(scope.id);
-      return map.requirements.filter((item) => pathScopes.has(item.scopeId))
-        .length;
+      let active = 0;
+      for (const scopeId of pathScopes)
+        active += requirementsByScope.get(scopeId) ?? 0;
+      return active;
     }),
   );
+  const childCounts = new Map<string, number>();
+  for (const scope of map.scopes)
+    if (scope.parentId)
+      childCounts.set(
+        scope.parentId,
+        (childCounts.get(scope.parentId) ?? 0) + 1,
+      );
   return {
     totalAtomicRequirements: map.requirements.length,
     maximumSimultaneouslyActive: maxActive,
@@ -268,12 +314,12 @@ export function instructionLoadVector(
       0,
       ...map.scopes.map((scope) => depth(scope.id)),
     ),
-    branchCount: map.scopes.filter(
-      (scope) =>
-        map.scopes.filter((child) => child.parentId === scope.id).length > 1,
-    ).length,
+    branchCount: [...childCounts.values()].filter((count) => count > 1).length,
     crossScopeReferences,
-    conflicts: conflictPairs.size,
+    conflicts: [...conflictGroups.values()].reduce(
+      (sum, group) => sum + group.prohibitions * group.permissions,
+      0,
+    ),
     duplicates: [...statements.values()].reduce(
       (sum, count) => sum + Math.max(0, count - 1),
       0,
@@ -285,6 +331,26 @@ export function instructionLoadVector(
             (item) => item.verifiability === "deterministic",
           ).length / map.requirements.length,
   };
+}
+
+function maximumDependencyDepth(
+  requirements: readonly AtomicRequirement[],
+): number {
+  const graph = new Map(
+    requirements.map((item) => [item.id, item.dependencies]),
+  );
+  const memo = new Map<string, number>();
+  const depth = (id: string): number => {
+    const known = memo.get(id);
+    if (known !== undefined) return known;
+    const dependencies = graph.get(id) ?? [];
+    const value = dependencies.length
+      ? 1 + Math.max(...dependencies.map(depth))
+      : 1;
+    memo.set(id, value);
+    return value;
+  };
+  return Math.max(0, ...requirements.map((item) => depth(item.id)));
 }
 
 function hasCycle(requirements: readonly AtomicRequirement[]): boolean {

@@ -87,6 +87,7 @@ const RESPONSE_SCHEMA = {
   properties: { themes: { type: "array", items: { type: "string" } } },
   required: ["themes"],
 } as const;
+type MockRegistrationStatus = "registered" | "unavailable" | "completed";
 
 export function App({
   workspaceService = service,
@@ -105,6 +106,9 @@ export function App({
     useState<InstructionLoadVector | null>(null);
   const [compare, setCompare] = useState<CompareArtifact | null>(null);
   const [evaluation, setEvaluation] = useState<EvaluationRecord | null>(null);
+  const [mockRegistrations, setMockRegistrations] = useState<
+    Readonly<Record<string, MockRegistrationStatus>>
+  >({});
   const [status, setStatus] = useState("Ready");
   const [webMcp, setWebMcp] = useState<"checking" | "available" | "fallback">(
     "checking",
@@ -211,8 +215,8 @@ export function App({
       [...next.evaluations]
         .sort(
           (left, right) =>
-            left.updatedAt.localeCompare(right.updatedAt) ||
-            left.createdAt.localeCompare(right.createdAt) ||
+            Date.parse(left.updatedAt) - Date.parse(right.updatedAt) ||
+            Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
             left.id.localeCompare(right.id),
         )
         .at(-1) ?? null,
@@ -332,12 +336,20 @@ export function App({
     }
     setEvaluation(result.value);
     setPanel("evaluate");
+    setMockRegistrations((current) => ({
+      ...current,
+      [result.value.id]: "unavailable",
+    }));
     if (registrationRef.current?.available) {
       try {
         const toolName = await registrationRef.current.registerMock(
           result.value.id,
           SAMPLE_CONTRACT.name,
         );
+        setMockRegistrations((current) => ({
+          ...current,
+          [result.value.id]: "registered",
+        }));
         setStatus(`Mock tool registered as ${toolName}`);
       } catch {
         setStatus("WebMCP mock unavailable: use Manual mock invocation below.");
@@ -372,6 +384,10 @@ export function App({
     );
     if (result.ok) {
       registrationRef.current?.unregisterMockForRun(result.value.id);
+      setMockRegistrations((current) => ({
+        ...current,
+        [result.value.id]: "completed",
+      }));
       setEvaluation(result.value);
       setStatus("Deterministic contract checks complete.");
     } else setStatus(result.error.message);
@@ -689,7 +705,9 @@ export function App({
             finalOutput={finalOutput}
             setFinalOutput={setFinalOutput}
             onSubmitFinal={safeSubmitFinal}
-            webMcp={webMcp}
+            mockStatus={
+              evaluation ? mockRegistrations[evaluation.id] : undefined
+            }
           />
         )}
         {panel === "history" && (
@@ -998,8 +1016,24 @@ function Metric({ label, value }: { label: string; value: string | number }) {
     </div>
   );
 }
-function EvaluationPanel(props: any) {
-  const evaluation = props.evaluation as EvaluationRecord | null;
+type EvaluationPanelProps = {
+  evaluation: EvaluationRecord | null;
+  selected: string;
+  setSelected(value: string): void;
+  rationale: string;
+  setRationale(value: string): void;
+  onPrepareTrigger(): void;
+  onSubmitTrigger(): void;
+  onPrepareTest(): void;
+  onInvokeMock(): void;
+  finalOutput: string;
+  setFinalOutput(value: string): void;
+  onSubmitFinal(): void;
+  mockStatus?: MockRegistrationStatus;
+};
+
+function EvaluationPanel(props: EvaluationPanelProps) {
+  const evaluation = props.evaluation;
   if (!evaluation)
     return (
       <div className="panel-stack">
@@ -1093,9 +1127,11 @@ function EvaluationPanel(props: any) {
       <div className="boundary-card">
         <strong>Mock world only</strong>
         <p>
-          {props.webMcp === "available"
-            ? "A run-scoped WebMCP mock tool is registered."
-            : "Native dynamic registration is unavailable. Use the manual inspector path below."}
+          {evaluation.status === "complete" || props.mockStatus === "completed"
+            ? "This run is complete; its run-scoped mock tool is unregistered."
+            : props.mockStatus === "registered"
+              ? "A run-scoped WebMCP mock tool is registered."
+              : "No run-scoped WebMCP mock is registered. Use the manual inspector path below."}
         </p>
       </div>
       <button onClick={props.onInvokeMock}>Manual mock invocation</button>

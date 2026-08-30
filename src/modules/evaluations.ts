@@ -293,6 +293,19 @@ export function submitTestRun(
   if (record.status === "complete")
     return err("evaluation_complete", "Evaluation is already complete.");
   const data = record.data as TestRunData;
+  const checks = deterministicContractChecks(data, finalOutput);
+  return ok({
+    ...record,
+    status: "complete",
+    updatedAt: new Date().toISOString(),
+    data: { ...data, finalOutput, checks },
+  });
+}
+
+export function deterministicContractChecks(
+  data: TestRunData,
+  finalOutput: unknown,
+): readonly ContractCheck[] {
   const calls = data.transcript.filter(
     (step): step is Extract<TranscriptStep, { kind: "tool-call" }> =>
       step.kind === "tool-call",
@@ -330,12 +343,7 @@ export function submitTestRun(
       message: "Final JSON output matches the Response schema.",
       deterministic: true,
     });
-  return ok({
-    ...record,
-    status: "complete",
-    updatedAt: new Date().toISOString(),
-    data: { ...data, finalOutput, checks },
-  });
+  return checks;
 }
 
 const SCHEMA_TYPES: readonly string[] = [

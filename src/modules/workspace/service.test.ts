@@ -224,6 +224,15 @@ describe("WorkspaceService input validation", () => {
           (artifact: any) => artifact.kind !== "instruction-load",
         );
       },
+      (snapshot: any) => {
+        snapshot.artifacts
+          .filter((artifact: any) =>
+            ["instruction-map", "instruction-load"].includes(artifact.kind),
+          )
+          .forEach((artifact: any) => {
+            artifact.id = `foreign-${artifact.kind}`;
+          });
+      },
     ]) {
       const snapshot = JSON.parse(exported.value);
       mutate(snapshot);
@@ -604,6 +613,76 @@ describe("snapshot import evaluation data guards", () => {
     const imported = await createWorkspaceService(
       new MemoryWorkspaceStore(),
     ).importSnapshot(json);
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
+  it("recomputes deterministic test-run checks during import", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const prepared = await service.prepareEvaluation(id, "test-run", {
+      contract: {
+        name: "read_items",
+        description: "Read items",
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        mockOutput: {},
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const invoked = await service.invokeMock(id, prepared.value.id, {});
+    if (!invoked.ok) throw new Error(invoked.error.message);
+    const completed = await service.submitEvaluation(id, prepared.value.id, {
+      finalOutput: {},
+    });
+    if (!completed.ok) throw new Error(completed.error.message);
+    const exported = await service.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const testRun = snapshot.evaluations.find(
+      (item: any) => item.kind === "test-run",
+    );
+    testRun.data.checks[0].passed = !testRun.data.checks[0].passed;
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
+  it("rejects noncanonical UTC timestamps", async () => {
+    for (const mutate of [
+      (snapshot: any) => {
+        snapshot.exportedAt = "2026-01-01T10:00:00+10:00";
+      },
+      (snapshot: any) => {
+        snapshot.evaluations[0].updatedAt = "2026-01-01T10:00:00+10:00";
+      },
+    ]) {
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(await snapshotWith(mutate));
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
+  it("rejects noncanonical reference paths instead of persisting them", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [{ path: "guide.md", content: "guide" }],
+    });
+    if (!created.ok) throw new Error(created.error.message);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    snapshot.revisions[0].references[0].path = "./guide.md";
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
     expect(imported.ok).toBe(false);
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });

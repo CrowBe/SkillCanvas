@@ -222,6 +222,66 @@ describe("App WebMCP registration lifecycle", () => {
     ).toBeInTheDocument();
   });
 
+  it("compares evaluation timestamps as instants", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ name: "Offset evaluation order" });
+    if (!created.ok) throw new Error(created.error.message);
+    const triggering = await source.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    const testRun = await source.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      {
+        contract: {
+          name: "read_feedback",
+          description: "mock",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object" },
+          mockOutput: {},
+        },
+      },
+    );
+    if (!triggering.ok || !testRun.ok)
+      throw new Error("evaluation preparation failed");
+    const opened = await source.open(created.value.workspace.id);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const offsetBundle = {
+      ...opened.value,
+      evaluations: opened.value.evaluations.map((item) =>
+        item.kind === "triggering"
+          ? {
+              ...item,
+              createdAt: "2026-01-01T00:30:00-01:00",
+              updatedAt: "2026-01-01T00:30:00-01:00",
+            }
+          : {
+              ...item,
+              createdAt: "2026-01-01T01:00:00.000Z",
+              updatedAt: "2026-01-01T01:00:00.000Z",
+            },
+      ),
+    };
+    const workspaceService = {
+      ...source,
+      open: vi.fn().mockResolvedValue({ ok: true, value: offsetBundle }),
+    };
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Offset evaluation order Revision 1/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Evals/ }));
+    expect(
+      await screen.findByRole("group", {
+        name: "Which Skill would you select?",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("unregisters a run-scoped mock after UI completion", async () => {
     let mockSignal: AbortSignal | undefined;
     document.modelContext = {
@@ -243,11 +303,45 @@ describe("App WebMCP registration lifecycle", () => {
       await screen.findByRole("button", { name: "Prepare mocked test run" }),
     );
     await screen.findByText(/Mock tool registered as mock_read_feedback_/);
+    expect(
+      screen.getByText("A run-scoped WebMCP mock tool is registered."),
+    ).toBeInTheDocument();
     expect(mockSignal?.aborted).toBe(false);
     fireEvent.click(
       screen.getByRole("button", { name: "Submit final output" }),
     );
     await screen.findByText("Deterministic contract checks complete.");
     expect(mockSignal?.aborted).toBe(true);
+    expect(
+      screen.getByText(
+        "This run is complete; its run-scoped mock tool is unregistered.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a rejected run-scoped mock as unavailable", async () => {
+    document.modelContext = {
+      async registerTool(tool) {
+        if (tool.name.startsWith("mock_")) throw new Error("rejected");
+        return undefined;
+      },
+    };
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await workspaceService.create({ name: "Mock rejected" });
+    if (!created.ok) throw new Error(created.error.message);
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Mock rejected Revision 1/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Evals/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Prepare mocked test run" }),
+    );
+    expect(
+      await screen.findByText(
+        "No run-scoped WebMCP mock is registered. Use the manual inspector path below.",
+      ),
+    ).toBeInTheDocument();
   });
 });
