@@ -48,7 +48,7 @@ describe("evaluation protocols", () => {
     } as const;
     expect(exampleFromSchema(schema)).toEqual({ items: ["example"] });
     expect(validateSchema({}, schema)).toContain("$.items is required.");
-    const run = prepareTestRun(
+    const run = await prepareTestRun(
       await bundle(),
       {
         name: "read_items",
@@ -96,7 +96,7 @@ describe("evaluation protocols", () => {
   });
 
   it("keeps completed test runs terminal", async () => {
-    const run = prepareTestRun(await bundle(), {
+    const run = await prepareTestRun(await bundle(), {
       name: "read_items",
       description: "Read items",
       inputSchema: { type: "object" },

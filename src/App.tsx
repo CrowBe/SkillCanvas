@@ -28,7 +28,10 @@ import type {
   WorkspaceBundle,
   WorkspaceRecord,
 } from "./modules/workspace/types";
-import { registerWebMcpTools } from "./modules/webmcp";
+import {
+  registerWebMcpTools,
+  type MockRegistrationStatus,
+} from "./modules/webmcp";
 
 const store = new IndexedDbWorkspaceStore();
 const service = createWorkspaceService(store);
@@ -87,8 +90,6 @@ const RESPONSE_SCHEMA = {
   properties: { themes: { type: "array", items: { type: "string" } } },
   required: ["themes"],
 } as const;
-type MockRegistrationStatus = "registered" | "unavailable" | "completed";
-
 export function App({
   workspaceService = service,
 }: {
@@ -165,6 +166,11 @@ export function App({
       appearance,
       selection,
       onWorkspaceChange: loadBundle,
+      onMockRegistrationChange: (evaluationId, nextStatus) =>
+        setMockRegistrations((current) => ({
+          ...current,
+          [evaluationId]: nextStatus,
+        })),
       download,
     })
       .then((registration) => {
@@ -336,25 +342,23 @@ export function App({
     }
     setEvaluation(result.value);
     setPanel("evaluate");
-    setMockRegistrations((current) => ({
-      ...current,
-      [result.value.id]: "unavailable",
-    }));
     if (registrationRef.current?.available) {
       try {
         const toolName = await registrationRef.current.registerMock(
           result.value.id,
           SAMPLE_CONTRACT.name,
         );
-        setMockRegistrations((current) => ({
-          ...current,
-          [result.value.id]: "registered",
-        }));
         setStatus(`Mock tool registered as ${toolName}`);
       } catch {
         setStatus("WebMCP mock unavailable: use Manual mock invocation below.");
       }
-    } else setStatus("WebMCP unavailable: use Manual mock invocation below.");
+    } else {
+      setMockRegistrations((current) => ({
+        ...current,
+        [result.value.id]: "unavailable",
+      }));
+      setStatus("WebMCP unavailable: use Manual mock invocation below.");
+    }
   }
   async function invokeManualMock() {
     if (!bundle || !evaluation) return;
@@ -384,10 +388,6 @@ export function App({
     );
     if (result.ok) {
       registrationRef.current?.unregisterMockForRun(result.value.id);
-      setMockRegistrations((current) => ({
-        ...current,
-        [result.value.id]: "completed",
-      }));
       setEvaluation(result.value);
       setStatus("Deterministic contract checks complete.");
     } else setStatus(result.error.message);

@@ -75,6 +75,15 @@ export type ContractCheck = {
   readonly deterministic: true;
 };
 
+export type TriggeringFixture = {
+  readonly cases: readonly TriggerCase[];
+};
+
+export type TestRunFixture = Pick<
+  TestRunData,
+  "scenario" | "contract" | "responseSchema"
+>;
+
 const DISTRACTORS = [
   {
     id: "distractor-translation",
@@ -93,10 +102,10 @@ const DISTRACTORS = [
   },
 ] as const;
 
-export async function prepareTriggering(
-  bundle: WorkspaceBundle,
-): Promise<EvaluationRecord> {
-  const description = descriptionFrom(bundle.skillMd);
+export async function triggeringFixture(
+  skillMd: string,
+): Promise<TriggeringFixture> {
+  const description = descriptionFrom(skillMd);
   const keyword =
     description
       .toLowerCase()
@@ -115,7 +124,7 @@ export async function prepareTriggering(
   ];
   const candidate: TriggerChoice = {
     id: "candidate",
-    name: nameFrom(bundle.skillMd),
+    name: nameFrom(skillMd),
     description,
     candidate: true,
   };
@@ -131,6 +140,13 @@ export async function prepareTriggering(
       choices,
     })),
   );
+  return { cases };
+}
+
+export async function prepareTriggering(
+  bundle: WorkspaceBundle,
+): Promise<EvaluationRecord> {
+  const fixture = await triggeringFixture(bundle.skillMd);
   const now = new Date().toISOString();
   return {
     id: makeId("eval"),
@@ -146,7 +162,7 @@ export async function prepareTriggering(
     },
     createdAt: now,
     updatedAt: now,
-    data: { cases, observations: [] } satisfies TriggeringRunData,
+    data: { ...fixture, observations: [] } satisfies TriggeringRunData,
   };
 }
 
@@ -226,21 +242,37 @@ export function submitTriggering(
   });
 }
 
-export function prepareTestRun(
-  bundle: WorkspaceBundle,
+export function testRunFixture(
   contract: ToolContract,
   responseSchema?: JsonSchema,
-): EvaluationRecord {
+): TestRunFixture {
   const seedData =
     contract.mockOutput ?? exampleFromSchema(contract.outputSchema);
-  const now = new Date().toISOString();
-  const data: TestRunData = {
+  return {
     scenario: {
       prompt: `Use ${contract.name} to complete the workflow described by the Skill.`,
       seedData,
     },
     contract,
     ...(responseSchema ? { responseSchema } : {}),
+  };
+}
+
+export async function testRunFixtureHash(
+  fixture: TestRunFixture,
+): Promise<string> {
+  return sha256(JSON.stringify(fixture));
+}
+
+export async function prepareTestRun(
+  bundle: WorkspaceBundle,
+  contract: ToolContract,
+  responseSchema?: JsonSchema,
+): Promise<EvaluationRecord> {
+  const now = new Date().toISOString();
+  const fixture = testRunFixture(contract, responseSchema);
+  const data: TestRunData = {
+    ...fixture,
     transcript: [],
   };
   return {
@@ -250,7 +282,11 @@ export function prepareTestRun(
     contentHash: bundle.revision.contentHash,
     kind: "test-run",
     status: "prepared",
-    versions: { testRun: TEST_RUN_VERSION, ruleset: RULESET_VERSION },
+    versions: {
+      testRun: TEST_RUN_VERSION,
+      ruleset: RULESET_VERSION,
+      fixture: await testRunFixtureHash(fixture),
+    },
     createdAt: now,
     updatedAt: now,
     data,

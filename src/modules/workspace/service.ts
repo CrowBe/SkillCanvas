@@ -13,16 +13,23 @@ import {
 } from "../instruction-map";
 import {
   deterministicContractChecks,
+  DISTRACTOR_LIBRARY_VERSION,
   invokeMockTool,
+  PROMPT_BATTERY_VERSION,
   schemaSubsetError,
   prepareTestRun,
   prepareTriggering,
+  testRunFixture,
+  testRunFixtureHash,
+  triggeringFixture,
   submitTestRun,
   submitTriggering,
+  TEST_RUN_VERSION,
   type ContractCheck,
   type JsonSchema,
   type TestRunData,
   type ToolContract,
+  type TriggeringRunData,
 } from "../evaluations";
 import {
   byteLength,
@@ -32,6 +39,7 @@ import {
   REFERENCE_MAX_BYTES,
   REFERENCES_MAX,
   RULESET_VERSION,
+  sha256,
   SNAPSHOT_MAX_BYTES,
   type DomainError,
   type Result,
@@ -144,7 +152,9 @@ export type CompareArtifact = {
     readonly kind: EvaluationKind;
     readonly revision: number;
     readonly status: EvaluationRecord["status"];
+    readonly updatedAt: string;
   }[];
+  readonly evaluationSnapshotHash: string;
 };
 
 export function createWorkspaceService(
@@ -272,18 +282,21 @@ export function createWorkspaceService(
         after.value.referenceFiles.map((file) => file.path),
       );
       const source = lineDiff(before.value.skillMd, after.value.skillMd);
+      const createdAt = new Date().toISOString();
       const evaluationReferences = after.value.evaluations
         .filter(
           (evaluation) =>
             evaluation.revision === beforeRevision ||
             evaluation.revision === afterRevision,
         )
-        .map(({ id, kind, revision, status }) => ({
+        .map(({ id, kind, revision, status, updatedAt }) => ({
           id,
           kind,
           revision,
           status,
-        }));
+          updatedAt,
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id));
       const data: CompareArtifact = {
         kind: "compare",
         beforeRevision,
@@ -291,10 +304,12 @@ export function createWorkspaceService(
         source,
         lint: { before: summary(beforeLint), after: summary(afterLint) },
         evaluationReferences,
+        evaluationSnapshotHash:
+          await comparisonEvaluationSnapshotHash(evaluationReferences),
       };
       try {
         await store.putArtifact(
-          artifact(after.value, "compare", data),
+          artifact(after.value, "compare", data, createdAt),
           after.value.revision.contentHash,
           after.value.evidenceGeneration,
         );
@@ -324,7 +339,7 @@ export function createWorkspaceService(
           );
           if (schemaError) return err("invalid_submission", schemaError);
         }
-        evaluation = prepareTestRun(
+        evaluation = await prepareTestRun(
           bundle.value,
           options.contract,
           options.responseSchema,
@@ -417,7 +432,7 @@ export function createWorkspaceService(
         : ok(portableSnapshotJson(snapshot));
     },
     async inspectSnapshotImport(json) {
-      const decoded = decodeSnapshot(json);
+      const decoded = await decodeSnapshot(json);
       if (!decoded.ok) return decoded;
       const target = await store.getReplacementTarget(
         decoded.value.workspace.id,
@@ -432,12 +447,12 @@ export function createWorkspaceService(
       });
     },
     async importSnapshot(json) {
-      const decoded = decodeSnapshot(json);
+      const decoded = await decodeSnapshot(json);
       if (!decoded.ok) return decoded;
       return fromStore(await store.importSnapshot(decoded.value));
     },
     async replaceSnapshot(json, replacementTarget) {
-      const decoded = decodeSnapshot(json);
+      const decoded = await decodeSnapshot(json);
       if (!decoded.ok) return decoded;
       return fromStore(
         await store.importSnapshot(decoded.value, {
@@ -449,7 +464,12 @@ export function createWorkspaceService(
   };
 }
 
-function decodeSnapshot(json: string): Result<WorkspaceSnapshot> {
+const SNAPSHOT_MAX_DEPTH = 64;
+const SNAPSHOT_MAX_NODES = 100_000;
+
+async function decodeSnapshot(
+  json: string,
+): Promise<Result<WorkspaceSnapshot>> {
   if (byteLength(json) > SNAPSHOT_MAX_BYTES)
     return err("size_limit", `Snapshot exceeds ${SNAPSHOT_MAX_BYTES} bytes.`);
   let snapshot: WorkspaceSnapshot;
@@ -458,9 +478,28 @@ function decodeSnapshot(json: string): Result<WorkspaceSnapshot> {
   } catch {
     return err("invalid_snapshot", "Snapshot is not valid JSON.");
   }
-  const shape = validateSnapshotShape(snapshot);
+  const complexityIssue = snapshotComplexityError(snapshot);
+  if (complexityIssue) return err("invalid_snapshot", complexityIssue);
+  const shape = await validateSnapshotShape(snapshot);
   if (!shape.ok) return shape;
   return ok(snapshot);
+}
+
+function snapshotComplexityError(value: unknown): string | null {
+  const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current.value === null || typeof current.value !== "object") continue;
+    nodes += 1;
+    if (nodes > SNAPSHOT_MAX_NODES)
+      return `Snapshot exceeds ${SNAPSHOT_MAX_NODES} structured values.`;
+    if (current.depth >= SNAPSHOT_MAX_DEPTH)
+      return `Snapshot nesting exceeds ${SNAPSHOT_MAX_DEPTH} levels.`;
+    for (const child of Object.values(current.value))
+      pending.push({ value: child, depth: current.depth + 1 });
+  }
+  return null;
 }
 
 function validateInput(
@@ -511,6 +550,7 @@ function artifact(
   bundle: WorkspaceBundle,
   kind: ArtifactRecord["kind"],
   data: unknown,
+  createdAt = new Date().toISOString(),
 ): ArtifactRecord {
   return {
     id: artifactId(bundle, kind),
@@ -518,7 +558,7 @@ function artifact(
     revision: bundle.revision.revision,
     kind,
     version: RULESET_VERSION,
-    createdAt: new Date().toISOString(),
+    createdAt,
     data,
   };
 }
@@ -756,7 +796,9 @@ function uniqueLinePositions(lines: readonly string[]): Map<string, number> {
   for (const line of duplicates) positions.delete(line);
   return positions;
 }
-function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
+async function validateSnapshotShape(
+  value: unknown,
+): Promise<Result<WorkspaceSnapshot>> {
   if (!value || typeof value !== "object")
     return err("invalid_snapshot", "Snapshot must be an object.");
   const snapshot = value as Partial<WorkspaceSnapshot>;
@@ -878,6 +920,15 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         "invalid_snapshot",
         `Evaluation ${evaluation.id} has inconsistent status: ${statusIssue}`,
       );
+    const fixtureIssue = await canonicalEvaluationFixtureError(
+      evaluation,
+      blobs.get(revision.contentHash)!,
+    );
+    if (fixtureIssue)
+      return err(
+        "invalid_snapshot",
+        `Evaluation ${evaluation.id} does not match its canonical fixture: ${fixtureIssue}`,
+      );
   }
   for (const artifact of snapshot.artifacts) {
     const issue = artifactRecordError(artifact);
@@ -910,7 +961,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         "invalid_snapshot",
         `Artifact ${artifact.id} has invalid data: ${artifactIssue}`,
       );
-    const deterministicIssue = deterministicArtifactError(
+    const deterministicIssue = await deterministicArtifactError(
       artifact,
       snapshot as WorkspaceSnapshot,
       revisionsByNumber,
@@ -981,7 +1032,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   return ok(snapshot as WorkspaceSnapshot);
 }
 
-function deterministicArtifactError(
+async function deterministicArtifactError(
   artifact: ArtifactRecord,
   snapshot: WorkspaceSnapshot,
   revisionsByNumber: ReadonlyMap<
@@ -989,7 +1040,7 @@ function deterministicArtifactError(
     WorkspaceSnapshot["revisions"][number]
   >,
   blobs: ReadonlyMap<string, string>,
-): string | null {
+): Promise<string | null> {
   if (
     artifact.kind === "instruction-map" ||
     artifact.kind === "instruction-load"
@@ -1033,8 +1084,9 @@ function deterministicArtifactError(
         ),
       },
       evaluationReferences: received.evaluationReferences,
+      evaluationSnapshotHash: received.evaluationSnapshotHash,
     } satisfies CompareArtifact;
-    const referenceIssue = comparisonEvaluationReferenceError(
+    const referenceIssue = await comparisonEvaluationReferenceError(
       received,
       snapshot.evaluations,
     );
@@ -1045,25 +1097,91 @@ function deterministicArtifactError(
     : "artifact data differs";
 }
 
-function comparisonEvaluationReferenceError(
+async function comparisonEvaluationReferenceError(
   comparison: CompareArtifact,
   evaluations: readonly EvaluationRecord[],
-): string | null {
+): Promise<string | null> {
   const statusRank = { prepared: 0, "in-progress": 1, complete: 2 } as const;
+  if (
+    comparison.evaluationSnapshotHash !==
+    (await comparisonEvaluationSnapshotHash(comparison.evaluationReferences))
+  )
+    return "comparison evaluation references differ";
   const seen = new Set<string>();
-  for (const reference of comparison.evaluationReferences) {
+  for (const [index, reference] of comparison.evaluationReferences.entries()) {
+    const previous = comparison.evaluationReferences[index - 1];
     const current = evaluations.find((item) => item.id === reference.id);
     if (
       seen.has(reference.id) ||
+      (previous !== undefined &&
+        previous.id.localeCompare(reference.id) >= 0) ||
       !current ||
       current.kind !== reference.kind ||
       current.revision !== reference.revision ||
       statusRank[reference.status] > statusRank[current.status] ||
+      !isCanonicalUtcTimestamp(reference.updatedAt) ||
+      Date.parse(reference.updatedAt) > Date.parse(current.updatedAt) ||
+      (reference.updatedAt === current.updatedAt &&
+        reference.status !== current.status) ||
       (reference.revision !== comparison.beforeRevision &&
         reference.revision !== comparison.afterRevision)
     )
       return "comparison evaluation references differ";
     seen.add(reference.id);
+  }
+  return null;
+}
+
+function comparisonEvaluationSnapshotHash(
+  references: CompareArtifact["evaluationReferences"],
+): Promise<string> {
+  return sha256(JSON.stringify(references));
+}
+
+async function canonicalEvaluationFixtureError(
+  evaluation: EvaluationRecord,
+  skillMd: string,
+): Promise<string | null> {
+  if (evaluation.kind === "triggering") {
+    if (
+      !sameJsonValue(evaluation.versions, {
+        promptBattery: PROMPT_BATTERY_VERSION,
+        distractorLibrary: DISTRACTOR_LIBRARY_VERSION,
+        ruleset: RULESET_VERSION,
+      })
+    )
+      return "triggering versions differ";
+    const fixture = await triggeringFixture(skillMd);
+    const data = evaluation.data as TriggeringRunData;
+    return sameJsonValue(data.cases, fixture.cases)
+      ? null
+      : "triggering cases differ";
+  }
+  if (evaluation.kind !== "test-run") return "unsupported evaluation kind";
+  const data = evaluation.data as TestRunData;
+  const fixture = testRunFixture(data.contract, data.responseSchema);
+  if (
+    !sameJsonValue(evaluation.versions, {
+      testRun: TEST_RUN_VERSION,
+      ruleset: RULESET_VERSION,
+      fixture: await testRunFixtureHash(fixture),
+    })
+  )
+    return "test-run versions differ";
+  if (!sameJsonValue(data.scenario, fixture.scenario))
+    return "test-run scenario differs";
+  for (let index = 0; index < data.transcript.length; index += 2) {
+    const call = data.transcript[index];
+    const result = data.transcript[index + 1];
+    if (
+      call?.kind !== "tool-call" ||
+      result?.kind !== "tool-result" ||
+      call.tool !== data.contract.name ||
+      result.tool !== data.contract.name ||
+      call.at !== result.at ||
+      !sameJsonValue(result.output, fixture.scenario.seedData)
+    )
+      return "test-run transcript differs";
   }
   return null;
 }
@@ -1447,7 +1565,8 @@ function artifactDataError(
     !isSchemaObject(data.lint) ||
     lintSummaryError(data.lint.before) !== null ||
     lintSummaryError(data.lint.after) !== null ||
-    !Array.isArray(data.evaluationReferences)
+    !Array.isArray(data.evaluationReferences) ||
+    typeof data.evaluationSnapshotHash !== "string"
   )
     return "compare artifact fields are incomplete.";
   for (const reference of data.evaluationReferences)
@@ -1460,7 +1579,8 @@ function artifactDataError(
       !Number.isInteger(reference.revision) ||
       !["prepared", "in-progress", "complete"].includes(
         reference.status as string,
-      )
+      ) ||
+      !isCanonicalUtcTimestamp(reference.updatedAt)
     )
       return "compare evaluation reference is invalid.";
   return null;

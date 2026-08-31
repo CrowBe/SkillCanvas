@@ -583,6 +583,37 @@ describe("snapshot import schema guards", () => {
       ).toBeDefined();
   });
 
+  it("rejects omitted comparison evaluation evidence", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const updated = await source.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const prepared = await source.prepareEvaluation(id, "triggering");
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const compared = await source.compare(id, 1, 2);
+    if (!compared.ok) throw new Error(compared.error.message);
+    const exported = await source.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    snapshot.artifacts.find(
+      (item: any) => item.kind === "compare",
+    ).data.evaluationReferences = [];
+
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
   it("recomputes deterministic artifacts during snapshot admission", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
@@ -738,6 +769,51 @@ describe("snapshot import evaluation data guards", () => {
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });
 
+  it("rejects altered deterministic evaluation fixtures", async () => {
+    for (const mutate of [
+      (snapshot: any) => {
+        snapshot.evaluations.find(
+          (item: any) => item.kind === "triggering",
+        ).data.cases[0].prompt = "Tampered prompt";
+      },
+      (snapshot: any) => {
+        snapshot.evaluations.find(
+          (item: any) => item.kind === "test-run",
+        ).data.scenario.seedData = { falsified: true };
+      },
+      (snapshot: any) => {
+        const testRun = snapshot.evaluations.find(
+          (item: any) => item.kind === "test-run",
+        );
+        testRun.data.contract.mockOutput = { falsified: true };
+        testRun.data.scenario.seedData = { falsified: true };
+      },
+    ]) {
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(await snapshotWith(mutate));
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
+  it("rejects snapshots beyond the iterative nesting bound", async () => {
+    const snapshot = JSON.parse(await snapshotWith(() => {}));
+    snapshot.auditEvents[0].details = { nested: "__nested_value__" };
+    const nested = `${'{"child":'.repeat(70)}null${"}".repeat(70)}`;
+    const withNestedAuditDetails = JSON.stringify(snapshot).replace(
+      '"__nested_value__"',
+      nested,
+    );
+
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(withNestedAuditDetails);
+
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
   it("recomputes deterministic test-run checks during import", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });
@@ -771,6 +847,41 @@ describe("snapshot import evaluation data guards", () => {
     ).importSnapshot(JSON.stringify(snapshot));
     expect(imported.ok).toBe(false);
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
+  it("preserves completed agent evidence with canonical fixtures", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const prepared = await source.prepareEvaluation(id, "test-run", {
+      contract: {
+        name: "read_items",
+        description: "Read items",
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        mockOutput: { items: [] },
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const invoked = await source.invokeMock(id, prepared.value.id, {
+      requestedBy: "agent",
+    });
+    if (!invoked.ok) throw new Error(invoked.error.message);
+    const completed = await source.submitEvaluation(id, prepared.value.id, {
+      finalOutput: { summary: "agent supplied" },
+    });
+    if (!completed.ok) throw new Error(completed.error.message);
+    const exported = await source.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(exported.value);
+
+    expect(imported.ok).toBe(true);
+    if (imported.ok)
+      expect(imported.value.evaluations[0]?.data).toEqual(completed.value.data);
   });
 
   it("rejects noncanonical UTC timestamps", async () => {
@@ -956,7 +1067,7 @@ describe("snapshot import triggering case guards", () => {
     }
   });
 
-  it("grades the selected choice candidate flag instead of a magic id", async () => {
+  it("rejects a noncanonical triggering candidate identity", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
@@ -973,25 +1084,11 @@ describe("snapshot import triggering case guards", () => {
     );
     for (const testCase of triggering.data.cases)
       testCase.choices.find((choice: any) => choice.candidate).id = "skill-1";
-    const importer = createWorkspaceService(new MemoryWorkspaceStore());
-    const imported = await importer.importSnapshot(JSON.stringify(snapshot));
-    if (!imported.ok) throw new Error(imported.error.message);
-    const record = imported.value.evaluations.find(
-      (item) => item.kind === "triggering",
-    )!;
-    const firstCase = (record.data as any).cases[0];
-    const graded = await importer.submitEvaluation(
-      imported.value.workspace.id,
-      record.id,
-      {
-        caseId: firstCase.id,
-        selectedChoiceId: "skill-1",
-        rationale: "This is the candidate Skill.",
-      },
-    );
-    expect(graded.ok).toBe(true);
-    if (graded.ok)
-      expect((graded.value.data as any).observations[0].passed).toBe(true);
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
+    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });
 
   it("rejects incomplete triggering choice records", async () => {

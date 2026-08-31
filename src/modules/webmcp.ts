@@ -33,6 +33,7 @@ export type WorkspaceSelection = {
   get(): string | null;
   set(workspaceId: string): void;
 };
+export type MockRegistrationStatus = "registered" | "unavailable" | "completed";
 
 type Runtime = {
   service: WorkspaceService;
@@ -49,6 +50,10 @@ type Runtime = {
     contractName: string,
   ) => Promise<string>;
   unregisterMockForRun?: (evaluationId: string) => void;
+  onMockRegistrationChange?: (
+    evaluationId: string,
+    status: MockRegistrationStatus,
+  ) => void;
 };
 
 function guardTool(
@@ -495,63 +500,75 @@ export async function registerWebMcpTools(
     evaluationId: string,
     contractName: string,
   ): Promise<string> => {
-    if (!context) throw new Error("WebMCP is unavailable.");
+    if (!context) {
+      runtime.onMockRegistrationChange?.(evaluationId, "unavailable");
+      throw new Error("WebMCP is unavailable.");
+    }
     const workspaceId = runtime.selection.get();
     if (!workspaceId) throw new Error("Open a workspace first.");
     const name = `mock_${contractName.replace(/[^A-Za-z0-9_.-]/g, "_")}_${evaluationId.replace(/[^A-Za-z0-9]/g, "").slice(-12)}`;
     const registration = new AbortController();
     mockControllers.set(evaluationId, registration);
-    await context.registerTool(
-      guardTool(
-        {
-          name,
-          title: `Mock ${contractName}`,
-          description: `Invokes the deterministic mock for test run ${evaluationId}.`,
-          inputSchema: { type: "object" },
-          annotations: { untrustedContentHint: true },
-          execute: async (input) => {
-            const result = await runtime.service.invokeMock(
-              workspaceId,
-              evaluationId,
-              input,
-            );
-            if (result.ok) {
-              const refreshed = await runtime.service.open(workspaceId);
-              if (refreshed.ok) runtime.onWorkspaceChange?.(refreshed.value);
-            }
-            return result.ok
-              ? {
-                  protocolVersion: PROTOCOL_VERSION,
-                  ok: true,
-                  workspaceId,
-                  revision: result.value.evaluation.revision,
-                  contentHash: result.value.evaluation.contentHash,
-                  data: {
-                    output: result.value.output,
-                    transcript: (result.value.evaluation.data as any)
-                      .transcript,
-                  },
-                }
-              : {
-                  protocolVersion: PROTOCOL_VERSION,
-                  ok: false,
-                  workspaceId,
-                  revision: null,
-                  contentHash: null,
-                  error: result.error,
-                };
+    try {
+      await context.registerTool(
+        guardTool(
+          {
+            name,
+            title: `Mock ${contractName}`,
+            description: `Invokes the deterministic mock for test run ${evaluationId}.`,
+            inputSchema: { type: "object" },
+            annotations: { untrustedContentHint: true },
+            execute: async (input) => {
+              const result = await runtime.service.invokeMock(
+                workspaceId,
+                evaluationId,
+                input,
+              );
+              if (result.ok) {
+                const refreshed = await runtime.service.open(workspaceId);
+                if (refreshed.ok) runtime.onWorkspaceChange?.(refreshed.value);
+              }
+              return result.ok
+                ? {
+                    protocolVersion: PROTOCOL_VERSION,
+                    ok: true,
+                    workspaceId,
+                    revision: result.value.evaluation.revision,
+                    contentHash: result.value.evaluation.contentHash,
+                    data: {
+                      output: result.value.output,
+                      transcript: (result.value.evaluation.data as any)
+                        .transcript,
+                    },
+                  }
+                : {
+                    protocolVersion: PROTOCOL_VERSION,
+                    ok: false,
+                    workspaceId,
+                    revision: null,
+                    contentHash: null,
+                    error: result.error,
+                  };
+            },
           },
-        },
-        runtime.selection,
-        workspaceId,
-      ),
-      { signal: registration.signal },
-    );
+          runtime.selection,
+          workspaceId,
+        ),
+        { signal: registration.signal },
+      );
+    } catch (error) {
+      mockControllers.delete(evaluationId);
+      registration.abort();
+      runtime.onMockRegistrationChange?.(evaluationId, "unavailable");
+      throw error;
+    }
+    runtime.onMockRegistrationChange?.(evaluationId, "registered");
     return name;
   };
   const unregisterMock = (evaluationId: string) => {
     mockControllers.get(evaluationId)?.abort();
     mockControllers.delete(evaluationId);
+    runtime.onMockRegistrationChange?.(evaluationId, "completed");
   };
   const tools = createToolHandlers({
     ...runtime,

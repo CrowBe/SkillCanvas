@@ -6,11 +6,20 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelContextAdapter, WebMcpTool } from "./modules/webmcp";
 import { EMPTY_SKILL } from "./modules/skill";
 import { MemoryWorkspaceStore } from "./modules/workspace/memory-store";
 import { createWorkspaceService } from "./modules/workspace/service";
+
+beforeEach(() => {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+});
 
 afterEach(() => {
   cleanup();
@@ -19,6 +28,63 @@ afterEach(() => {
 });
 
 describe("App WebMCP registration lifecycle", () => {
+  it("reflects WebMCP-prepared mock lifecycle transitions in the panel", async () => {
+    const registered = new Map<
+      string,
+      { tool: WebMcpTool; signal?: AbortSignal }
+    >();
+    document.modelContext = {
+      async registerTool(tool, options) {
+        registered.set(tool.name, { tool, signal: options?.signal });
+        return undefined;
+      },
+    };
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    await vi.waitFor(() => expect(registered.has("skill_open")).toBe(true));
+    const execute = (name: string, input: unknown) =>
+      registered.get(name)!.tool.execute(input, {
+        signal: new AbortController().signal,
+      }) as Promise<any>;
+    await act(async () => {
+      await execute("skill_open", { skillMd: EMPTY_SKILL });
+    });
+    let prepared: any;
+    await act(async () => {
+      prepared = await execute("evaluation_prepare", {
+        kind: "test-run",
+        contract: {
+          name: "read_items",
+          description: "Read items",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object" },
+          mockOutput: {},
+        },
+      });
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Evals/ }));
+    expect(
+      await screen.findByText("A run-scoped WebMCP mock tool is registered."),
+    ).toBeInTheDocument();
+    const mock = registered.get(prepared.data.mockToolName)!;
+    expect(mock.signal?.aborted).toBe(false);
+
+    await act(async () => {
+      await execute("evaluation_submit", {
+        evaluationId: prepared.data.evaluation.id,
+        submission: { finalOutput: {} },
+      });
+    });
+
+    expect(mock.signal?.aborted).toBe(true);
+    expect(
+      await screen.findByText(
+        "This run is complete; its run-scoped mock tool is unregistered.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("leaves exactly one live registration per tool under StrictMode", async () => {
     const live = new Map<string, number>();
     const context: ModelContextAdapter = {
@@ -31,12 +97,6 @@ describe("App WebMCP registration lifecycle", () => {
       },
     };
     document.modelContext = context;
-    window.matchMedia = ((query: string) => ({
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    })) as unknown as typeof window.matchMedia;
     const { App } = await import("./App");
     await act(async () => {
       render(
