@@ -32,7 +32,7 @@ type PersistedRevision = SkillRevision & {
 };
 type PersistCondition =
   | { readonly kind: "create" }
-  | { readonly kind: "append"; readonly baseRevision: number }
+  | { readonly kind: "append"; readonly base: SkillRevision }
   | {
       readonly kind: "replace";
       readonly target: WorkspaceReplacementTarget;
@@ -267,7 +267,8 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     const transaction = db.transaction([...STORES], "readwrite");
     const workspaceStore = transaction.objectStore("workspaces");
     const persistedWorkspace = (await workspaceStore.get(workspaceId)) as
-      PersistedWorkspace | undefined;
+      | PersistedWorkspace
+      | undefined;
     const workspace = persistedWorkspace
       ? domainWorkspace(persistedWorkspace)
       : undefined;
@@ -279,18 +280,26 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         "invalid_snapshot",
         "A workspace with this id already exists.",
       );
-    if (
-      condition.kind === "append" &&
-      workspace?.currentRevision !== condition.baseRevision
-    )
-      conflict = persistenceError(
-        "revision_conflict",
-        "The workspace changed after this edit began.",
-        {
-          expectedBaseRevision: workspace?.currentRevision,
-          receivedBaseRevision: condition.baseRevision,
-        },
-      );
+    if (condition.kind === "append") {
+      const persistedBase = (await transaction
+        .objectStore("revisions")
+        .get(`${workspaceId}:${condition.base.revision}`)) as
+        | PersistedRevision
+        | undefined;
+      if (
+        workspace?.currentRevision !== condition.base.revision ||
+        !persistedBase ||
+        !sameRecord(domainRevision(persistedBase), condition.base)
+      )
+        conflict = persistenceError(
+          "revision_conflict",
+          "The workspace changed after this edit began.",
+          {
+            expectedBaseRevision: workspace?.currentRevision,
+            receivedBaseRevision: condition.base.revision,
+          },
+        );
+    }
     if (
       condition.kind === "replace" &&
       (!sameWorkspace(workspace, condition.target.workspace) ||
@@ -438,7 +447,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
 
     if (condition.kind === "append") {
       const revision = snapshot.revisions.find(
-        (item) => item.revision === condition.baseRevision + 1,
+        (item) => item.revision === condition.base.revision + 1,
       )!;
       const previousAuditIds = new Set(
         previous?.auditEvents.map((event) => event.id),
@@ -639,7 +648,12 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       (staged) => staged.appendRevision(input),
       (result) => ("code" in result ? undefined : input.workspaceId),
       input.workspaceId,
-      () => ({ kind: "append", baseRevision: input.baseRevision }),
+      (previous) => ({
+        kind: "append",
+        base: previous!.revisions.find(
+          (revision) => revision.revision === input.baseRevision,
+        )!,
+      }),
       (error) => error,
     );
   }
@@ -721,7 +735,8 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   ): Promise<WorkspaceReplacementTarget | DomainError> {
     const db = await this.db();
     const persisted = (await db.get("workspaces", workspaceId)) as
-      PersistedWorkspace | undefined;
+      | PersistedWorkspace
+      | undefined;
     if (!persisted)
       return persistenceError(
         "workspace_not_found",

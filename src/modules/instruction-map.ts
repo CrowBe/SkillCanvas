@@ -1,9 +1,15 @@
-import { err, ok, type Result, type SourceSpan } from "./shared";
+import { byteLength, err, ok, type Result, type SourceSpan } from "./shared";
 
 export type InstructionKind =
-  "action" | "constraint" | "condition" | "prohibition" | "preference";
+  | "action"
+  | "constraint"
+  | "condition"
+  | "prohibition"
+  | "preference";
 export type Verifiability =
-  "deterministic" | "semantic-judgment" | "unverified";
+  | "deterministic"
+  | "semantic-judgment"
+  | "unverified";
 export type AtomicRequirement = {
   readonly id: string;
   readonly sourceSpan: SourceSpan;
@@ -53,6 +59,10 @@ export const INSTRUCTION_MAP_MAX_SCOPES = 1000;
 export const INSTRUCTION_MAP_MAX_REQUIREMENTS = 1000;
 export const INSTRUCTION_MAP_MAX_DEPENDENCIES_PER_REQUIREMENT = 100;
 export const INSTRUCTION_MAP_MAX_DEPTH = 100;
+export const INSTRUCTION_MAP_MAX_BYTES = 512 * 1024;
+export const INSTRUCTION_MAP_MAX_ID_LENGTH = 256;
+export const INSTRUCTION_MAP_MAX_LABEL_LENGTH = 512;
+export const INSTRUCTION_MAP_MAX_STATEMENT_LENGTH = 4096;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -62,8 +72,41 @@ function shapeError(message: string): Result<InstructionMap> {
   return err("invalid_instruction_map", message);
 }
 
+function oversized(value: string, maximum: number): boolean {
+  return value.length > maximum;
+}
+
+function jsonWithinBudget(value: unknown, maximum: number): boolean {
+  let remaining = maximum;
+  const seen = new Set<object>();
+  const visit = (candidate: unknown): boolean => {
+    remaining -= 1;
+    if (remaining < 0) return false;
+    if (typeof candidate === "string") {
+      if (candidate.length > remaining) return false;
+      remaining -= byteLength(candidate);
+      return remaining >= 0;
+    }
+    if (candidate === null || typeof candidate !== "object") return true;
+    if (seen.has(candidate)) return false;
+    seen.add(candidate);
+    for (const [key, nested] of Object.entries(candidate)) {
+      if (key.length > remaining) return false;
+      remaining -= byteLength(key);
+      if (!visit(nested)) return false;
+    }
+    seen.delete(candidate);
+    return true;
+  };
+  return visit(value);
+}
+
 function checkShape(input: unknown): Result<InstructionMap> {
   if (!isRecord(input)) return shapeError("Instruction map must be an object.");
+  if (!jsonWithinBudget(input, INSTRUCTION_MAP_MAX_BYTES))
+    return shapeError(
+      `Instruction map exceeds ${INSTRUCTION_MAP_MAX_BYTES} bytes.`,
+    );
   if (typeof input.revision !== "number")
     return shapeError("Instruction map requires a numeric revision.");
   if (input.status !== "proposed" && input.status !== "accepted")
@@ -85,10 +128,23 @@ function checkShape(input: unknown): Result<InstructionMap> {
   for (const scope of input.scopes) {
     if (!isRecord(scope) || typeof scope.id !== "string" || scope.id === "")
       return shapeError("Every scope requires a string id.");
+    if (oversized(scope.id, INSTRUCTION_MAP_MAX_ID_LENGTH))
+      return shapeError("Scope id exceeds the instruction map limit.");
     if (typeof scope.label !== "string")
       return shapeError(`Scope ${scope.id} requires a string label.`);
+    if (oversized(scope.label, INSTRUCTION_MAP_MAX_LABEL_LENGTH))
+      return shapeError(
+        `Scope ${scope.id} label exceeds the instruction map limit.`,
+      );
     if (scope.parentId !== undefined && typeof scope.parentId !== "string")
       return shapeError(`Scope ${scope.id} has an invalid parentId.`);
+    if (
+      typeof scope.parentId === "string" &&
+      oversized(scope.parentId, INSTRUCTION_MAP_MAX_ID_LENGTH)
+    )
+      return shapeError(
+        `Scope ${scope.id} parentId exceeds the instruction map limit.`,
+      );
   }
   for (const requirement of input.requirements) {
     if (
@@ -98,10 +154,20 @@ function checkShape(input: unknown): Result<InstructionMap> {
     )
       return shapeError("Every requirement requires a string id.");
     const label = requirement.id;
+    if (oversized(label, INSTRUCTION_MAP_MAX_ID_LENGTH))
+      return shapeError("Requirement id exceeds the instruction map limit.");
     if (typeof requirement.statement !== "string")
       return shapeError(`Requirement ${label} requires a statement.`);
+    if (oversized(requirement.statement, INSTRUCTION_MAP_MAX_STATEMENT_LENGTH))
+      return shapeError(
+        `Requirement ${label} statement exceeds the instruction map limit.`,
+      );
     if (typeof requirement.scopeId !== "string")
       return shapeError(`Requirement ${label} requires a scopeId.`);
+    if (oversized(requirement.scopeId, INSTRUCTION_MAP_MAX_ID_LENGTH))
+      return shapeError(
+        `Requirement ${label} scopeId exceeds the instruction map limit.`,
+      );
     if (!INSTRUCTION_KINDS.includes(requirement.kind as string))
       return shapeError(`Requirement ${label} has an unknown kind.`);
     if (!VERIFIABILITIES.includes(requirement.verifiability as string))
@@ -111,6 +177,14 @@ function checkShape(input: unknown): Result<InstructionMap> {
       requirement.dependencies.some((item) => typeof item !== "string")
     )
       return shapeError(`Requirement ${label} has invalid dependencies.`);
+    if (
+      requirement.dependencies.some((item) =>
+        oversized(item, INSTRUCTION_MAP_MAX_ID_LENGTH),
+      )
+    )
+      return shapeError(
+        `Requirement ${label} dependency exceeds the instruction map limit.`,
+      );
     if (
       requirement.dependencies.length >
       INSTRUCTION_MAP_MAX_DEPENDENCIES_PER_REQUIREMENT
@@ -124,6 +198,16 @@ function checkShape(input: unknown): Result<InstructionMap> {
     )
       return shapeError(`Requirement ${label} requires a numeric source span.`);
   }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(input);
+  } catch {
+    return shapeError("Instruction map must be JSON serializable.");
+  }
+  if (byteLength(serialized) > INSTRUCTION_MAP_MAX_BYTES)
+    return shapeError(
+      `Instruction map exceeds ${INSTRUCTION_MAP_MAX_BYTES} bytes.`,
+    );
   return ok(input as unknown as InstructionMap);
 }
 

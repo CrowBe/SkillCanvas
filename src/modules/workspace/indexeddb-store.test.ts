@@ -297,6 +297,50 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     );
   });
 
+  it("rejects a stale append after same-number snapshot replacement", async () => {
+    const control = databaseControl();
+    const stale = new IndexedDbWorkspaceStore(control.database);
+    const created = await stale.createWorkspace({
+      name: "shared",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    await stale.openWorkspace(created.workspace.id);
+    const replacing = new IndexedDbWorkspaceStore(control.database);
+    const snapshot = await replacing.exportSnapshot(created.workspace.id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    const replacementContent = `${EMPTY_SKILL}\nReplacement content.`;
+    const replacementHash = await sha256(replacementContent);
+    (snapshot.blobs as any[])[0] = {
+      hash: replacementHash,
+      content: replacementContent,
+      bytes: byteLength(replacementContent),
+    };
+    (snapshot.revisions[0] as { contentHash: string }).contentHash =
+      replacementHash;
+    const replaced = await replacing.importSnapshot(snapshot, {
+      replaceExisting: true,
+      replacementTarget: await replacementTarget(
+        replacing,
+        created.workspace.id,
+      ),
+    });
+    if ("code" in replaced) throw new Error(replaced.message);
+
+    const rejected = await stale.appendRevision({
+      workspaceId: created.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nStale edit.`,
+      actor: "human",
+    });
+
+    expect("code" in rejected && rejected.code).toBe("revision_conflict");
+    const current = await replacing.openWorkspace(created.workspace.id);
+    expect("code" in current ? undefined : current.skillMd).toBe(
+      replacementContent,
+    );
+  });
+
   it("rejects replacement when the confirmed persisted target changed", async () => {
     const control = databaseControl();
     const first = new IndexedDbWorkspaceStore(control.database);

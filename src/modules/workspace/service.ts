@@ -857,11 +857,7 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
         "invalid_snapshot",
         `Artifact ${artifact.id} is not linked to an imported revision.`,
       );
-    if (
-      (artifact.kind === "instruction-map" ||
-        artifact.kind === "instruction-load") &&
-      artifact.id !== `${workspace.id}:${artifact.revision}:${artifact.kind}`
-    )
+    if (artifact.id !== `${workspace.id}:${artifact.revision}:${artifact.kind}`)
       return err(
         "invalid_snapshot",
         `Artifact ${artifact.id} does not use its canonical singleton id.`,
@@ -876,6 +872,17 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       return err(
         "invalid_snapshot",
         `Artifact ${artifact.id} has invalid data: ${artifactIssue}`,
+      );
+    const deterministicIssue = deterministicArtifactError(
+      artifact,
+      snapshot as WorkspaceSnapshot,
+      revisionsByNumber,
+      blobs,
+    );
+    if (deterministicIssue)
+      return err(
+        "invalid_snapshot",
+        `Artifact ${artifact.id} does not match canonical analysis: ${deterministicIssue}`,
       );
   }
   for (const revision of snapshot.revisions) {
@@ -935,6 +942,97 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
       );
   }
   return ok(snapshot as WorkspaceSnapshot);
+}
+
+function deterministicArtifactError(
+  artifact: ArtifactRecord,
+  snapshot: WorkspaceSnapshot,
+  revisionsByNumber: ReadonlyMap<
+    number,
+    WorkspaceSnapshot["revisions"][number]
+  >,
+  blobs: ReadonlyMap<string, string>,
+): string | null {
+  if (
+    artifact.kind === "instruction-map" ||
+    artifact.kind === "instruction-load"
+  )
+    return null;
+  if (artifact.version !== RULESET_VERSION) return "ruleset version differs";
+  const revision = revisionsByNumber.get(artifact.revision)!;
+  const skillMd = blobs.get(revision.contentHash)!;
+  let expected: unknown;
+  if (artifact.kind === "lint")
+    expected = analyzeLint(
+      skillMd,
+      revision.references.map((reference) => reference.path),
+    );
+  else if (artifact.kind === "structure") expected = analyzeStructure(skillMd);
+  else {
+    const received = artifact.data as CompareArtifact;
+    const before = revisionsByNumber.get(received.beforeRevision);
+    const after = revisionsByNumber.get(received.afterRevision);
+    if (!before || !after || received.afterRevision !== artifact.revision)
+      return "comparison revisions differ";
+    const beforeSkill = blobs.get(before.contentHash)!;
+    const afterSkill = blobs.get(after.contentHash)!;
+    expected = {
+      kind: "compare",
+      beforeRevision: received.beforeRevision,
+      afterRevision: received.afterRevision,
+      source: lineDiff(beforeSkill, afterSkill),
+      lint: {
+        before: summary(
+          analyzeLint(
+            beforeSkill,
+            before.references.map((reference) => reference.path),
+          ),
+        ),
+        after: summary(
+          analyzeLint(
+            afterSkill,
+            after.references.map((reference) => reference.path),
+          ),
+        ),
+      },
+      evaluationReferences: snapshot.evaluations
+        .filter(
+          (evaluation) =>
+            evaluation.revision === received.beforeRevision ||
+            evaluation.revision === received.afterRevision,
+        )
+        .map(({ id, kind, revision, status }) => ({
+          id,
+          kind,
+          revision,
+          status,
+        })),
+    } satisfies CompareArtifact;
+  }
+  return sameJsonValue(artifact.data, expected)
+    ? null
+    : "artifact data differs";
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right))
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => sameJsonValue(value, right[index]))
+    );
+  if (!isSchemaObject(left) || !isSchemaObject(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] && sameJsonValue(left[key], right[key]),
+    )
+  );
 }
 
 function isSchemaObject(value: unknown): value is Record<string, unknown> {

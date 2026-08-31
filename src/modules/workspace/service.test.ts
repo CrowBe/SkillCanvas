@@ -510,6 +510,54 @@ describe("WorkspaceService schema and submission guards", () => {
 });
 
 describe("snapshot import schema guards", () => {
+  it("recomputes deterministic artifacts during snapshot admission", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const firstAnalysis = await source.analyze(id, ["lint", "structure"]);
+    if (!firstAnalysis.ok) throw new Error(firstAnalysis.error.message);
+    const updated = await source.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\n## Added\n\nRun the workflow.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const secondAnalysis = await source.analyze(id, ["lint", "structure"]);
+    if (!secondAnalysis.ok) throw new Error(secondAnalysis.error.message);
+    const compared = await source.compare(id, 1, 2);
+    if (!compared.ok) throw new Error(compared.error.message);
+    const exported = await source.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+
+    for (const mutate of [
+      (snapshot: any) => {
+        snapshot.artifacts.find(
+          (item: any) => item.kind === "lint",
+        ).data.score += 1;
+      },
+      (snapshot: any) => {
+        snapshot.artifacts.find(
+          (item: any) => item.kind === "structure",
+        ).data.title = "Falsified";
+      },
+      (snapshot: any) => {
+        snapshot.artifacts.find(
+          (item: any) => item.kind === "compare",
+        ).data.source.additions += 1;
+      },
+    ]) {
+      const snapshot = JSON.parse(exported.value);
+      mutate(snapshot);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(JSON.stringify(snapshot));
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+  });
+
   it("rejects an imported test-run evaluation whose contract schema is malformed", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });

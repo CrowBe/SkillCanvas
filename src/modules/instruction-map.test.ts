@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  INSTRUCTION_MAP_MAX_BYTES,
   INSTRUCTION_MAP_MAX_DEPTH,
   INSTRUCTION_MAP_MAX_REQUIREMENTS,
+  INSTRUCTION_MAP_MAX_STATEMENT_LENGTH,
   instructionLoadVector,
   validateInstructionMap,
   type InstructionMap,
@@ -178,5 +180,38 @@ describe("instruction map validation", () => {
         1,
       ).ok,
     ).toBe(false);
+  });
+
+  it("rejects oversized fields and total payloads before analysis", () => {
+    const requirement = (id: string, statement: string) => ({
+      id,
+      sourceSpan: { start: 0, end: 3 },
+      statement,
+      kind: "action" as const,
+      scopeId: "root",
+      dependencies: [],
+      verifiability: "deterministic" as const,
+    });
+    const oversizedField = {
+      ...base,
+      scopes: [{ id: "root", label: "Root" }],
+      requirements: [
+        requirement("r", "x".repeat(INSTRUCTION_MAP_MAX_STATEMENT_LENGTH + 1)),
+      ],
+    };
+    expect(validateInstructionMap(oversizedField, raw, 1).ok).toBe(false);
+
+    const statement = "x".repeat(600);
+    const oversizedPayload = {
+      ...base,
+      scopes: [{ id: "root", label: "Root" }],
+      requirements: Array.from({ length: 900 }, (_, index) =>
+        requirement(`r-${index}`, statement),
+      ),
+    };
+    expect(JSON.stringify(oversizedPayload).length).toBeGreaterThan(
+      INSTRUCTION_MAP_MAX_BYTES,
+    );
+    expect(validateInstructionMap(oversizedPayload, raw, 1).ok).toBe(false);
   });
 });
