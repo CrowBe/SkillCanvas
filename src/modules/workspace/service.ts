@@ -48,6 +48,11 @@ import type {
   WorkspaceSnapshot,
   WorkspaceStore,
 } from "./types";
+import {
+  PortableSnapshotSizeError,
+  portableSnapshotJson,
+  portableSnapshotSizeError,
+} from "./snapshot-budget";
 
 export interface WorkspaceService {
   create(input?: {
@@ -157,15 +162,19 @@ export function createWorkspaceService(
         input.referenceFiles === undefined ? [] : input.referenceFiles;
       const valid = validateInput(skillMd, referenceFiles);
       if (!valid.ok) return valid;
-      return ok(
-        await store.createWorkspace({
-          name: input.name ?? parsedName(skillMd),
-          skillMd,
-          referenceFiles: valid.value,
-          ephemeral: input.ephemeral,
-          actor: input.actor,
-        }),
-      );
+      try {
+        return ok(
+          await store.createWorkspace({
+            name: input.name ?? parsedName(skillMd),
+            skillMd,
+            referenceFiles: valid.value,
+            ephemeral: input.ephemeral,
+            actor: input.actor,
+          }),
+        );
+      } catch (error) {
+        return snapshotMutationFailure(error);
+      }
     },
     list: () => store.listWorkspaces(),
     open,
@@ -198,13 +207,17 @@ export function createWorkspaceService(
         result.structure = analyzeStructure(bundle.value.skillMd);
         artifacts.push(artifact(bundle.value, "structure", result.structure));
       }
-      await store.updateArtifacts({
-        workspaceId,
-        revision: bundle.value.revision.revision,
-        expectedContentHash: bundle.value.revision.contentHash,
-        expectedGeneration: bundle.value.evidenceGeneration,
-        artifacts,
-      });
+      try {
+        await store.updateArtifacts({
+          workspaceId,
+          revision: bundle.value.revision.revision,
+          expectedContentHash: bundle.value.revision.contentHash,
+          expectedGeneration: bundle.value.evidenceGeneration,
+          artifacts,
+        });
+      } catch (error) {
+        return snapshotMutationFailure(error);
+      }
       return ok(result);
     },
     async submitInstructionMap(workspaceId, map, accept) {
@@ -227,16 +240,22 @@ export function createWorkspaceService(
         acceptedMap,
       );
       const vector = accept ? instructionLoadVector(acceptedMap) : undefined;
-      await store.updateArtifacts({
-        workspaceId,
-        revision: bundle.value.revision.revision,
-        expectedContentHash: bundle.value.revision.contentHash,
-        expectedGeneration: bundle.value.evidenceGeneration,
-        artifacts: vector
-          ? [mapArtifact, artifact(bundle.value, "instruction-load", vector)]
-          : [mapArtifact],
-        deleteIds: vector ? [] : [artifactId(bundle.value, "instruction-load")],
-      });
+      try {
+        await store.updateArtifacts({
+          workspaceId,
+          revision: bundle.value.revision.revision,
+          expectedContentHash: bundle.value.revision.contentHash,
+          expectedGeneration: bundle.value.evidenceGeneration,
+          artifacts: vector
+            ? [mapArtifact, artifact(bundle.value, "instruction-load", vector)]
+            : [mapArtifact],
+          deleteIds: vector
+            ? []
+            : [artifactId(bundle.value, "instruction-load")],
+        });
+      } catch (error) {
+        return snapshotMutationFailure(error);
+      }
       return ok({ map: acceptedMap, ...(vector ? { vector } : {}) });
     },
     async compare(workspaceId, beforeRevision, afterRevision) {
@@ -273,11 +292,15 @@ export function createWorkspaceService(
         lint: { before: summary(beforeLint), after: summary(afterLint) },
         evaluationReferences,
       };
-      await store.putArtifact(
-        artifact(after.value, "compare", data),
-        after.value.revision.contentHash,
-        after.value.evidenceGeneration,
-      );
+      try {
+        await store.putArtifact(
+          artifact(after.value, "compare", data),
+          after.value.revision.contentHash,
+          after.value.evidenceGeneration,
+        );
+      } catch (error) {
+        return snapshotMutationFailure(error);
+      }
       return ok(data);
     },
     async prepareEvaluation(workspaceId, kind, options) {
@@ -311,7 +334,11 @@ export function createWorkspaceService(
           "invalid_submission",
           "Capacity probes require an accepted instruction map and are deferred in this proof.",
         );
-      await store.recordEvaluationEvidence(evaluation);
+      try {
+        await store.recordEvaluationEvidence(evaluation);
+      } catch (error) {
+        return snapshotMutationFailure(error);
+      }
       return ok(evaluation);
     },
     async submitEvaluation(workspaceId, evaluationId, input) {
@@ -341,7 +368,11 @@ export function createWorkspaceService(
               )
             : err("invalid_submission", "Unsupported evaluation kind.");
       if (!result.ok) return result;
-      await store.recordEvaluationEvidence(result.value, evaluation);
+      try {
+        await store.recordEvaluationEvidence(result.value, evaluation);
+      } catch (error) {
+        return snapshotMutationFailure(error);
+      }
       return result;
     },
     async invokeMock(workspaceId, evaluationId, input) {
@@ -354,7 +385,11 @@ export function createWorkspaceService(
         return err("evaluation_not_found", "Evaluation was not found.");
       const result = invokeMockTool(evaluation, input);
       if (!result.ok) return result;
-      await store.recordEvaluationEvidence(result.value.record, evaluation);
+      try {
+        await store.recordEvaluationEvidence(result.value.record, evaluation);
+      } catch (error) {
+        return snapshotMutationFailure(error);
+      }
       return ok({
         evaluation: result.value.record,
         output: result.value.output,
@@ -379,7 +414,7 @@ export function createWorkspaceService(
       const snapshot = await store.exportSnapshot(workspaceId);
       return "code" in snapshot
         ? { ok: false, error: snapshot }
-        : ok(JSON.stringify(snapshot, null, 2));
+        : ok(portableSnapshotJson(snapshot));
     },
     async inspectSnapshotImport(json) {
       const decoded = decodeSnapshot(json);
@@ -737,6 +772,8 @@ function validateSnapshotShape(value: unknown): Result<WorkspaceSnapshot> {
   )
     return err("invalid_snapshot", "Snapshot shape or version is invalid.");
   const workspace = snapshot.workspace as WorkspaceRecord;
+  const sizeIssue = portableSnapshotSizeError(snapshot as WorkspaceSnapshot);
+  if (sizeIssue) return { ok: false, error: sizeIssue };
   if (
     snapshot.revisions.length > 1000 ||
     snapshot.blobs.length > 1025 ||
@@ -995,23 +1032,46 @@ function deterministicArtifactError(
           ),
         ),
       },
-      evaluationReferences: snapshot.evaluations
-        .filter(
-          (evaluation) =>
-            evaluation.revision === received.beforeRevision ||
-            evaluation.revision === received.afterRevision,
-        )
-        .map(({ id, kind, revision, status }) => ({
-          id,
-          kind,
-          revision,
-          status,
-        })),
+      evaluationReferences: received.evaluationReferences,
     } satisfies CompareArtifact;
+    const referenceIssue = comparisonEvaluationReferenceError(
+      received,
+      snapshot.evaluations,
+    );
+    if (referenceIssue) return referenceIssue;
   }
   return sameJsonValue(artifact.data, expected)
     ? null
     : "artifact data differs";
+}
+
+function comparisonEvaluationReferenceError(
+  comparison: CompareArtifact,
+  evaluations: readonly EvaluationRecord[],
+): string | null {
+  const statusRank = { prepared: 0, "in-progress": 1, complete: 2 } as const;
+  const seen = new Set<string>();
+  for (const reference of comparison.evaluationReferences) {
+    const current = evaluations.find((item) => item.id === reference.id);
+    if (
+      seen.has(reference.id) ||
+      !current ||
+      current.kind !== reference.kind ||
+      current.revision !== reference.revision ||
+      statusRank[reference.status] > statusRank[current.status] ||
+      (reference.revision !== comparison.beforeRevision &&
+        reference.revision !== comparison.afterRevision)
+    )
+      return "comparison evaluation references differ";
+    seen.add(reference.id);
+  }
+  return null;
+}
+
+function snapshotMutationFailure(error: unknown): Result<never> {
+  if (error instanceof PortableSnapshotSizeError)
+    return { ok: false, error: error.domainError };
+  throw error;
 }
 
 function sameJsonValue(left: unknown, right: unknown): boolean {

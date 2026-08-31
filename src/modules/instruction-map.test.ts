@@ -214,4 +214,26 @@ describe("instruction map validation", () => {
     );
     expect(validateInstructionMap(oversizedPayload, raw, 1).ok).toBe(false);
   });
+
+  it("rejects adversarial nesting without overflowing the call stack", () => {
+    const nested: Record<string, unknown> = {};
+    let current = nested;
+    for (let depth = 0; depth < 1000; depth += 1) {
+      const next: Record<string, unknown> = {};
+      current.next = next;
+      current = next;
+    }
+    const result = validateInstructionMap(
+      {
+        ...base,
+        scopes: [{ id: "root", label: "Root" }],
+        requirements: [],
+        nested,
+      },
+      raw,
+      1,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("invalid_instruction_map");
+  });
 });

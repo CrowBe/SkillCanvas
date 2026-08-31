@@ -17,6 +17,10 @@ import type {
   WorkspaceSnapshot,
   WorkspaceStore,
 } from "./types";
+import {
+  PortableSnapshotSizeError,
+  portableSnapshotSizeError,
+} from "./snapshot-budget";
 
 type State = {
   workspaces: Map<string, WorkspaceRecord>;
@@ -130,6 +134,8 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     this.state.revisions.set(id, [revision]);
     this.state.auditEvents.set(audit.id, audit);
     this.bumpGeneration(id);
+    const sizeIssue = this.enforcePortableBudget(id);
+    if (sizeIssue) throw new PortableSnapshotSizeError(sizeIssue);
     return this.bundle(workspace, revision);
   }
 
@@ -178,6 +184,8 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     const current = this.state.revisions
       .get(input.workspaceId)!
       .find((item) => item.revision === workspace.currentRevision)!;
+    const previous = this.buildSnapshot(input.workspaceId);
+    const previousGeneration = this.generations.get(input.workspaceId) ?? 0;
     const references = input.referenceFiles
       ? await Promise.all(
           input.referenceFiles.map(async (file) => ({
@@ -205,7 +213,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     };
     this.state.workspaces.set(workspace.id, nextWorkspace);
     this.state.revisions.get(workspace.id)!.push(revision);
-    await this.appendAuditEvent({
+    const audit: AuditEvent = {
       id: makeId("audit"),
       workspaceId: workspace.id,
       at: now,
@@ -213,7 +221,15 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       action: "skill.revision-appended",
       revision: revisionNumber,
       details: { baseRevision: input.baseRevision },
-    });
+    };
+    this.state.auditEvents.set(audit.id, audit);
+    this.bumpGeneration(workspace.id);
+    const sizeIssue = this.enforcePortableBudget(
+      workspace.id,
+      previous,
+      previousGeneration,
+    );
+    if (sizeIssue) return sizeIssue;
     return this.bundle(nextWorkspace, revision);
   }
 
@@ -262,10 +278,18 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       if (existing && existing.workspaceId !== input.workspaceId)
         throw new Error("Artifact evidence ownership changed.");
     }
+    const previous = this.buildSnapshot(input.workspaceId);
+    const previousGeneration = this.generations.get(input.workspaceId) ?? 0;
     for (const id of input.deleteIds ?? []) this.state.artifacts.delete(id);
     for (const artifact of input.artifacts)
       this.state.artifacts.set(artifact.id, structuredClone(artifact));
     this.bumpGeneration(input.workspaceId);
+    const sizeIssue = this.enforcePortableBudget(
+      input.workspaceId,
+      previous,
+      previousGeneration,
+    );
+    if (sizeIssue) throw new PortableSnapshotSizeError(sizeIssue);
   }
   async recordEvaluationEvidence(
     evaluation: EvaluationRecord,
@@ -282,17 +306,40 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       (expected !== undefined && !sameRecord(existing, expected))
     )
       throw new Error("Evaluation evidence changed in another operation.");
+    const previous = this.buildSnapshot(evaluation.workspaceId);
+    const previousGeneration =
+      this.generations.get(evaluation.workspaceId) ?? 0;
     this.state.evaluations.set(evaluation.id, structuredClone(evaluation));
     this.bumpGeneration(evaluation.workspaceId);
+    const sizeIssue = this.enforcePortableBudget(
+      evaluation.workspaceId,
+      previous,
+      previousGeneration,
+    );
+    if (sizeIssue) throw new PortableSnapshotSizeError(sizeIssue);
   }
   async appendAuditEvent(event: AuditEvent): Promise<void> {
+    const previous = this.buildSnapshot(event.workspaceId);
+    const previousGeneration = this.generations.get(event.workspaceId) ?? 0;
     this.state.auditEvents.set(event.id, structuredClone(event));
     this.bumpGeneration(event.workspaceId);
+    const sizeIssue = this.enforcePortableBudget(
+      event.workspaceId,
+      previous,
+      previousGeneration,
+    );
+    if (sizeIssue) throw new PortableSnapshotSizeError(sizeIssue);
   }
 
   async exportSnapshot(
     workspaceId: string,
   ): Promise<WorkspaceSnapshot | DomainError> {
+    const snapshot = this.buildSnapshot(workspaceId);
+    if ("code" in snapshot) return snapshot;
+    return portableSnapshotSizeError(snapshot) ?? snapshot;
+  }
+
+  private buildSnapshot(workspaceId: string): WorkspaceSnapshot | DomainError {
     const workspace = this.state.workspaces.get(workspaceId);
     const revisions = this.state.revisions.get(workspaceId);
     if (!workspace || !revisions)
@@ -339,6 +386,8 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       replacementTarget?: WorkspaceReplacementTarget;
     } = {},
   ): Promise<DomainError | null> {
+    const sizeIssue = portableSnapshotSizeError(snapshot);
+    if (sizeIssue) return sizeIssue;
     const existingWorkspace = this.state.workspaces.get(snapshot.workspace.id);
     if (
       options.replaceExisting &&
@@ -483,6 +532,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
   }
 
   private removeWorkspace(workspaceId: string): void {
+    this.generations.delete(workspaceId);
     this.state.workspaces.delete(workspaceId);
     this.state.revisions.delete(workspaceId);
     deleteWorkspaceRecords(this.state.artifacts, workspaceId);
@@ -498,6 +548,21 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     );
     for (const hash of this.state.blobs.keys())
       if (!referencedHashes.has(hash)) this.state.blobs.delete(hash);
+  }
+
+  private enforcePortableBudget(
+    workspaceId: string,
+    previous?: WorkspaceSnapshot | DomainError,
+    previousGeneration = 0,
+  ): DomainError | null {
+    const candidate = this.buildSnapshot(workspaceId);
+    if ("code" in candidate) return candidate;
+    const sizeIssue = portableSnapshotSizeError(candidate);
+    if (!sizeIssue) return null;
+    this.removeWorkspace(workspaceId);
+    if (previous && !("code" in previous))
+      this.admitSnapshot(previous, previousGeneration);
+    return sizeIssue;
   }
 
   async getReplacementTarget(

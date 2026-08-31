@@ -1,15 +1,9 @@
 import { byteLength, err, ok, type Result, type SourceSpan } from "./shared";
 
 export type InstructionKind =
-  | "action"
-  | "constraint"
-  | "condition"
-  | "prohibition"
-  | "preference";
+  "action" | "constraint" | "condition" | "prohibition" | "preference";
 export type Verifiability =
-  | "deterministic"
-  | "semantic-judgment"
-  | "unverified";
+  "deterministic" | "semantic-judgment" | "unverified";
 export type AtomicRequirement = {
   readonly id: string;
   readonly sourceSpan: SourceSpan;
@@ -63,6 +57,7 @@ export const INSTRUCTION_MAP_MAX_BYTES = 512 * 1024;
 export const INSTRUCTION_MAP_MAX_ID_LENGTH = 256;
 export const INSTRUCTION_MAP_MAX_LABEL_LENGTH = 512;
 export const INSTRUCTION_MAP_MAX_STATEMENT_LENGTH = 4096;
+export const INSTRUCTION_MAP_MAX_INPUT_DEPTH = 100;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -78,27 +73,27 @@ function oversized(value: string, maximum: number): boolean {
 
 function jsonWithinBudget(value: unknown, maximum: number): boolean {
   let remaining = maximum;
-  const seen = new Set<object>();
-  const visit = (candidate: unknown): boolean => {
+  const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  while (pending.length > 0) {
+    const { value: candidate, depth } = pending.pop()!;
     remaining -= 1;
     if (remaining < 0) return false;
     if (typeof candidate === "string") {
       if (candidate.length > remaining) return false;
       remaining -= byteLength(candidate);
-      return remaining >= 0;
+      if (remaining < 0) return false;
+      continue;
     }
-    if (candidate === null || typeof candidate !== "object") return true;
-    if (seen.has(candidate)) return false;
-    seen.add(candidate);
+    if (candidate === null || typeof candidate !== "object") continue;
+    if (depth >= INSTRUCTION_MAP_MAX_INPUT_DEPTH) return false;
     for (const [key, nested] of Object.entries(candidate)) {
       if (key.length > remaining) return false;
       remaining -= byteLength(key);
-      if (!visit(nested)) return false;
+      if (remaining < 0) return false;
+      pending.push({ value: nested, depth: depth + 1 });
     }
-    seen.delete(candidate);
-    return true;
-  };
-  return visit(value);
+  }
+  return true;
 }
 
 function checkShape(input: unknown): Result<InstructionMap> {

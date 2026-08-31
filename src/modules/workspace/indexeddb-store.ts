@@ -32,7 +32,11 @@ type PersistedRevision = SkillRevision & {
 };
 type PersistCondition =
   | { readonly kind: "create" }
-  | { readonly kind: "append"; readonly base: SkillRevision }
+  | {
+      readonly kind: "append";
+      readonly base: SkillRevision;
+      readonly workspace: WorkspaceRecord;
+    }
   | {
       readonly kind: "replace";
       readonly target: WorkspaceReplacementTarget;
@@ -267,8 +271,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     const transaction = db.transaction([...STORES], "readwrite");
     const workspaceStore = transaction.objectStore("workspaces");
     const persistedWorkspace = (await workspaceStore.get(workspaceId)) as
-      | PersistedWorkspace
-      | undefined;
+      PersistedWorkspace | undefined;
     const workspace = persistedWorkspace
       ? domainWorkspace(persistedWorkspace)
       : undefined;
@@ -284,10 +287,10 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       const persistedBase = (await transaction
         .objectStore("revisions")
         .get(`${workspaceId}:${condition.base.revision}`)) as
-        | PersistedRevision
-        | undefined;
+        PersistedRevision | undefined;
       if (
         workspace?.currentRevision !== condition.base.revision ||
+        !sameWorkspace(workspace, condition.workspace) ||
         !persistedBase ||
         !sameRecord(domainRevision(persistedBase), condition.base)
       )
@@ -650,6 +653,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       input.workspaceId,
       (previous) => ({
         kind: "append",
+        workspace: previous!.workspace,
         base: previous!.revisions.find(
           (revision) => revision.revision === input.baseRevision,
         )!,
@@ -735,8 +739,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   ): Promise<WorkspaceReplacementTarget | DomainError> {
     const db = await this.db();
     const persisted = (await db.get("workspaces", workspaceId)) as
-      | PersistedWorkspace
-      | undefined;
+      PersistedWorkspace | undefined;
     if (!persisted)
       return persistenceError(
         "workspace_not_found",

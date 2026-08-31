@@ -341,6 +341,42 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     );
   });
 
+  it("rejects a stale append after metadata-only snapshot replacement", async () => {
+    const control = databaseControl();
+    const stale = new IndexedDbWorkspaceStore(control.database);
+    const created = await stale.createWorkspace({
+      name: "Original name",
+      skillMd: EMPTY_SKILL,
+      referenceFiles: [],
+    });
+    await stale.openWorkspace(created.workspace.id);
+    const replacing = new IndexedDbWorkspaceStore(control.database);
+    const snapshot = await replacing.exportSnapshot(created.workspace.id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    (snapshot.workspace as { name: string }).name = "Replacement name";
+    const replaced = await replacing.importSnapshot(snapshot, {
+      replaceExisting: true,
+      replacementTarget: await replacementTarget(
+        replacing,
+        created.workspace.id,
+      ),
+    });
+    if ("code" in replaced) throw new Error(replaced.message);
+
+    const rejected = await stale.appendRevision({
+      workspaceId: created.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nStale edit.`,
+      actor: "human",
+    });
+
+    expect("code" in rejected && rejected.code).toBe("revision_conflict");
+    const current = await stale.openWorkspace(created.workspace.id);
+    expect("code" in current ? undefined : current.workspace.name).toBe(
+      "Replacement name",
+    );
+  });
+
   it("rejects replacement when the confirmed persisted target changed", async () => {
     const control = databaseControl();
     const first = new IndexedDbWorkspaceStore(control.database);

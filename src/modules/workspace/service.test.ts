@@ -1,10 +1,44 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
+import { SNAPSHOT_MAX_BYTES, byteLength } from "../shared";
 import { EMPTY_SKILL } from "../skill";
 import { MemoryWorkspaceStore } from "./memory-store";
 import { createWorkspaceService } from "./service";
 
 describe("WorkspaceService", () => {
+  it("rejects revisions that would make the portable snapshot oversized", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const reference = (index: number) => ({
+      path: `references/${index}.txt`,
+      content: `${index}:`.padEnd(470_000, String(index % 10)),
+    });
+    const created = await service.create({
+      skillMd: EMPTY_SKILL,
+      referenceFiles: Array.from({ length: 7 }, (_, index) => reference(index)),
+    });
+    if (!created.ok) throw new Error(created.error.message);
+
+    const rejected = await service.update({
+      workspaceId: created.value.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nOversized history.`,
+      referenceFiles: Array.from({ length: 9 }, (_, index) => reference(index)),
+      actor: "human",
+    });
+
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe("size_limit");
+    const current = await service.open(created.value.workspace.id);
+    expect(current.ok && current.value.revision.revision).toBe(1);
+    const exported = await service.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    expect(byteLength(exported.value)).toBeLessThanOrEqual(SNAPSHOT_MAX_BYTES);
+    const restored = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(exported.value);
+    expect(restored.ok).toBe(true);
+  });
+
   it("appends immutable revisions and returns a typed stale-base conflict", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });
@@ -510,6 +544,45 @@ describe("WorkspaceService schema and submission guards", () => {
 });
 
 describe("snapshot import schema guards", () => {
+  it("preserves comparisons across later evaluation lifecycle changes", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const updated = await source.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const prepared = await source.prepareEvaluation(id, "triggering");
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const compared = await source.compare(id, 1, 2);
+    if (!compared.ok) throw new Error(compared.error.message);
+    const firstCase = (prepared.value.data as any).cases[0];
+    const submitted = await source.submitEvaluation(id, prepared.value.id, {
+      caseId: firstCase.id,
+      selectedChoiceId: firstCase.choices[0].id,
+      rationale: "Lifecycle advanced after comparison.",
+    });
+    if (!submitted.ok) throw new Error(submitted.error.message);
+    const later = await source.prepareEvaluation(id, "triggering");
+    if (!later.ok) throw new Error(later.error.message);
+    const exported = await source.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(exported.value);
+
+    expect(imported.ok).toBe(true);
+    if (imported.ok)
+      expect(
+        imported.value.artifacts.find((item) => item.kind === "compare"),
+      ).toBeDefined();
+  });
+
   it("recomputes deterministic artifacts during snapshot admission", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
