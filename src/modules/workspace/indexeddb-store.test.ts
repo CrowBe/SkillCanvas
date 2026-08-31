@@ -611,7 +611,7 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     );
     if (!prepared.ok) throw new Error(prepared.error.message);
     const testCase = (prepared.value.data as any).cases[0];
-    const submissions = await Promise.allSettled([
+    const submissions = await Promise.all([
       service.submitEvaluation(created.value.workspace.id, prepared.value.id, {
         caseId: testCase.id,
         selectedChoiceId: testCase.choices[0].id,
@@ -623,12 +623,11 @@ describe("IndexedDbWorkspaceStore transactions", () => {
         rationale: "Second concurrent submission",
       }),
     ]);
-    expect(
-      submissions.filter((result) => result.status === "fulfilled"),
-    ).toHaveLength(1);
-    expect(
-      submissions.filter((result) => result.status === "rejected"),
-    ).toHaveLength(1);
+    expect(submissions.filter((result) => result.ok)).toHaveLength(1);
+    const rejected = submissions.find((result) => !result.ok);
+    expect(rejected?.ok).toBe(false);
+    if (rejected && !rejected.ok)
+      expect(rejected.error.code).toBe("revision_conflict");
     const current = await service.open(created.value.workspace.id);
     if (!current.ok) throw new Error(current.error.message);
     const evaluation = current.value.evaluations.find(

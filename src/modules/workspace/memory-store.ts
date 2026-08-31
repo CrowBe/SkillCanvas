@@ -1,4 +1,5 @@
 import {
+  DomainMutationError,
   RULESET_VERSION,
   byteLength,
   makeId,
@@ -258,7 +259,12 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       (this.generations.get(input.workspaceId) ?? 0) !==
       input.expectedGeneration
     )
-      throw new Error("Workspace evidence changed before it was saved.");
+      throw new DomainMutationError(
+        domainError(
+          "revision_conflict",
+          "Workspace evidence changed before it was saved.",
+        ),
+      );
     this.requireEvidenceRevision(
       input.workspaceId,
       input.revision,
@@ -305,7 +311,12 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       (expected === undefined && existing !== undefined) ||
       (expected !== undefined && !sameRecord(existing, expected))
     )
-      throw new Error("Evaluation evidence changed in another operation.");
+      throw new DomainMutationError(
+        domainError(
+          "revision_conflict",
+          "Evaluation evidence changed in another operation.",
+        ),
+      );
     const previous = this.buildSnapshot(evaluation.workspaceId);
     const previousGeneration =
       this.generations.get(evaluation.workspaceId) ?? 0;
@@ -593,7 +604,12 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       .get(workspaceId)
       ?.find((record) => record.revision === revision);
     if (!persisted || persisted.contentHash !== contentHash)
-      throw new Error("Evidence revision changed before it was saved.");
+      throw new DomainMutationError(
+        domainError(
+          "revision_conflict",
+          "Evidence revision changed before it was saved.",
+        ),
+      );
   }
 
   protected async putBlob(content: string): Promise<string> {
