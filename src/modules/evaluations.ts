@@ -391,12 +391,41 @@ const SCHEMA_TYPES: readonly string[] = [
   "boolean",
   "null",
 ];
+const SCHEMA_MAX_DEPTH = 64;
+const SCHEMA_MAX_NODES = 100_000;
 
 function isSchemaNode(value: unknown): value is JsonSchema {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function schemaComplexityError(schema: unknown, path: string): string | null {
+  const pending: { value: unknown; depth: number }[] = [
+    { value: schema, depth: 0 },
+  ];
+  let nodes = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    nodes += 1;
+    if (nodes > SCHEMA_MAX_NODES)
+      return `${path} exceeds ${SCHEMA_MAX_NODES} structured values.`;
+    if (current.value === null || typeof current.value !== "object") continue;
+    if (current.depth >= SCHEMA_MAX_DEPTH)
+      return `${path} nesting exceeds ${SCHEMA_MAX_DEPTH} levels.`;
+    for (const child of Array.isArray(current.value)
+      ? current.value
+      : Object.values(current.value))
+      pending.push({ value: child, depth: current.depth + 1 });
+  }
+  return null;
+}
+
 export function schemaSubsetError(schema: unknown, path = "$"): string | null {
+  return (
+    schemaComplexityError(schema, path) ?? schemaSubsetNodeError(schema, path)
+  );
+}
+
+function schemaSubsetNodeError(schema: unknown, path: string): string | null {
   if (!isSchemaNode(schema)) return `${path} must be a JSON Schema object.`;
   if (
     schema.type !== undefined &&
@@ -420,13 +449,13 @@ export function schemaSubsetError(schema: unknown, path = "$"): string | null {
     if (!isSchemaNode(schema.properties))
       return `${path}.properties must be an object.`;
     for (const [key, child] of Object.entries(schema.properties)) {
-      const issue = schemaSubsetError(child, `${path}.${key}`);
+      const issue = schemaSubsetNodeError(child, `${path}.${key}`);
       if (issue) return issue;
     }
   }
   if (schema.items !== undefined) {
     if (schema.type !== "array") return `${path}.items requires type array.`;
-    const issue = schemaSubsetError(schema.items, `${path}[]`);
+    const issue = schemaSubsetNodeError(schema.items, `${path}[]`);
     if (issue) return issue;
   }
   return null;

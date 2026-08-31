@@ -574,13 +574,17 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       },
     );
     if (!accepted.ok) throw new Error(accepted.error.message);
-    await expect(
-      second.submitEvaluation(created.value.workspace.id, prepared.value.id, {
+    const rejected = await second.submitEvaluation(
+      created.value.workspace.id,
+      prepared.value.id,
+      {
         caseId: firstCase.id,
         selectedChoiceId: firstCase.choices[1].id,
         rationale: "Stale tab evidence",
-      }),
-    ).rejects.toThrow("Evaluation evidence changed");
+      },
+    );
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe("revision_conflict");
     const reader = createWorkspaceService(
       new IndexedDbWorkspaceStore(control.database),
     );
@@ -709,9 +713,11 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       ),
     });
     if ("code" in replaced) throw new Error(replaced.message);
-    await expect(
-      staleService.analyze(created.value.workspace.id, ["lint"]),
-    ).rejects.toThrow("Workspace evidence changed");
+    const rejected = await staleService.analyze(created.value.workspace.id, [
+      "lint",
+    ]);
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe("revision_conflict");
     const current = await replacing.openWorkspace(created.value.workspace.id);
     expect("code" in current ? [] : current.artifacts).toEqual([]);
   });

@@ -1,5 +1,5 @@
 import { openDB, type IDBPDatabase } from "idb";
-import type { DomainError } from "../shared";
+import { DomainMutationError, type DomainError } from "../shared";
 import { MemoryWorkspaceStore } from "./memory-store";
 import type {
   ArtifactRecord,
@@ -607,7 +607,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       if (conflict) {
         await this.refreshWorkspace(id);
         if (onConflict) return onConflict(conflict);
-        throw new Error(conflict.message);
+        throw new DomainMutationError(conflict);
       }
       if (plan.kind === "create" || plan.kind === "replace") {
         const committed = await staged.exportSnapshot(id);

@@ -28,6 +28,12 @@ export type DomainError = {
   readonly details?: Readonly<Record<string, unknown>>;
 };
 
+export class DomainMutationError extends Error {
+  constructor(readonly domainError: DomainError) {
+    super(domainError.message);
+  }
+}
+
 export type Result<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: DomainError };

@@ -37,7 +37,12 @@ export type ArtifactRecord = {
   readonly workspaceId: string;
   readonly revision: number;
   readonly kind:
-    "lint" | "structure" | "instruction-map" | "instruction-load" | "compare";
+    | "lint"
+    | "structure"
+    | "instruction-map"
+    | "instruction-load"
+    | "compare"
+    | "comparison-evaluation-state";
   readonly version: string;
   readonly createdAt: string;
   readonly data: unknown;

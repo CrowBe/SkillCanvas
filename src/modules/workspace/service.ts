@@ -33,6 +33,7 @@ import {
 } from "../evaluations";
 import {
   byteLength,
+  DomainMutationError,
   err,
   normalizeReferencePath,
   ok,
@@ -154,7 +155,14 @@ export type CompareArtifact = {
     readonly status: EvaluationRecord["status"];
     readonly updatedAt: string;
   }[];
+  readonly evaluationStateId: string;
   readonly evaluationSnapshotHash: string;
+};
+
+type ComparisonEvaluationStateArtifact = {
+  readonly kind: "comparison-evaluation-state";
+  readonly comparisonId: string;
+  readonly evaluations: readonly EvaluationRecord[];
 };
 
 export function createWorkspaceService(
@@ -297,6 +305,17 @@ export function createWorkspaceService(
           updatedAt,
         }))
         .sort((left, right) => left.id.localeCompare(right.id));
+      const evaluationStateId = artifactId(
+        after.value,
+        "comparison-evaluation-state",
+      );
+      const evaluationStates = after.value.evaluations
+        .filter(
+          (evaluation) =>
+            evaluation.revision === beforeRevision ||
+            evaluation.revision === afterRevision,
+        )
+        .sort((left, right) => left.id.localeCompare(right.id));
       const data: CompareArtifact = {
         kind: "compare",
         beforeRevision,
@@ -304,15 +323,31 @@ export function createWorkspaceService(
         source,
         lint: { before: summary(beforeLint), after: summary(afterLint) },
         evaluationReferences,
+        evaluationStateId,
         evaluationSnapshotHash:
-          await comparisonEvaluationSnapshotHash(evaluationReferences),
+          await comparisonEvaluationSnapshotHash(evaluationStates),
+      };
+      const evaluationState: ComparisonEvaluationStateArtifact = {
+        kind: "comparison-evaluation-state",
+        comparisonId: artifactId(after.value, "compare"),
+        evaluations: evaluationStates,
       };
       try {
-        await store.putArtifact(
-          artifact(after.value, "compare", data, createdAt),
-          after.value.revision.contentHash,
-          after.value.evidenceGeneration,
-        );
+        await store.updateArtifacts({
+          workspaceId,
+          revision: after.value.revision.revision,
+          expectedContentHash: after.value.revision.contentHash,
+          expectedGeneration: after.value.evidenceGeneration,
+          artifacts: [
+            artifact(after.value, "compare", data, createdAt),
+            artifact(
+              after.value,
+              "comparison-evaluation-state",
+              evaluationState,
+              createdAt,
+            ),
+          ],
+        });
       } catch (error) {
         return snapshotMutationFailure(error);
       }
@@ -1050,6 +1085,21 @@ async function deterministicArtifactError(
   const revision = revisionsByNumber.get(artifact.revision)!;
   const skillMd = blobs.get(revision.contentHash)!;
   let expected: unknown;
+  if (artifact.kind === "comparison-evaluation-state") {
+    const state = artifact.data as ComparisonEvaluationStateArtifact;
+    const comparison = snapshot.artifacts.find(
+      (candidate) => candidate.id === state.comparisonId,
+    );
+    return comparison?.kind === "compare"
+      ? comparisonEvaluationStateError(
+          comparison,
+          artifact,
+          snapshot,
+          revisionsByNumber,
+          blobs,
+        )
+      : "comparison evaluation state is orphaned";
+  }
   if (artifact.kind === "lint")
     expected = analyzeLint(
       skillMd,
@@ -1064,6 +1114,23 @@ async function deterministicArtifactError(
       return "comparison revisions differ";
     const beforeSkill = blobs.get(before.contentHash)!;
     const afterSkill = blobs.get(after.contentHash)!;
+    const stateArtifact = snapshot.artifacts.find(
+      (candidate) => candidate.id === received.evaluationStateId,
+    );
+    if (stateArtifact?.kind !== "comparison-evaluation-state")
+      return "comparison evaluation state is missing";
+    const stateIssue = await comparisonEvaluationStateError(
+      artifact,
+      stateArtifact,
+      snapshot,
+      revisionsByNumber,
+      blobs,
+    );
+    if (stateIssue) return stateIssue;
+    const evaluationStates = (
+      stateArtifact.data as ComparisonEvaluationStateArtifact
+    ).evaluations;
+    const evaluationReferences = evaluationStates.map(evaluationReference);
     expected = {
       kind: "compare",
       beforeRevision: received.beforeRevision,
@@ -1083,59 +1150,148 @@ async function deterministicArtifactError(
           ),
         ),
       },
-      evaluationReferences: received.evaluationReferences,
-      evaluationSnapshotHash: received.evaluationSnapshotHash,
+      evaluationReferences,
+      evaluationStateId: stateArtifact.id,
+      evaluationSnapshotHash:
+        await comparisonEvaluationSnapshotHash(evaluationStates),
     } satisfies CompareArtifact;
-    const referenceIssue = await comparisonEvaluationReferenceError(
-      received,
-      snapshot.evaluations,
-    );
-    if (referenceIssue) return referenceIssue;
   }
   return sameJsonValue(artifact.data, expected)
     ? null
     : "artifact data differs";
 }
 
-async function comparisonEvaluationReferenceError(
-  comparison: CompareArtifact,
-  evaluations: readonly EvaluationRecord[],
+async function comparisonEvaluationStateError(
+  comparisonArtifact: ArtifactRecord,
+  stateArtifact: ArtifactRecord,
+  snapshot: WorkspaceSnapshot,
+  revisionsByNumber: ReadonlyMap<
+    number,
+    WorkspaceSnapshot["revisions"][number]
+  >,
+  blobs: ReadonlyMap<string, string>,
 ): Promise<string | null> {
+  const comparison = comparisonArtifact.data as CompareArtifact;
+  const state = stateArtifact.data as ComparisonEvaluationStateArtifact;
   const statusRank = { prepared: 0, "in-progress": 1, complete: 2 } as const;
   if (
-    comparison.evaluationSnapshotHash !==
-    (await comparisonEvaluationSnapshotHash(comparison.evaluationReferences))
+    state.comparisonId !== comparisonArtifact.id ||
+    comparison.evaluationStateId !== stateArtifact.id ||
+    stateArtifact.revision !== comparisonArtifact.revision ||
+    stateArtifact.createdAt !== comparisonArtifact.createdAt ||
+    stateArtifact.version !== comparisonArtifact.version
   )
-    return "comparison evaluation references differ";
-  const seen = new Set<string>();
-  for (const [index, reference] of comparison.evaluationReferences.entries()) {
-    const previous = comparison.evaluationReferences[index - 1];
-    const current = evaluations.find((item) => item.id === reference.id);
-    if (
-      seen.has(reference.id) ||
-      (previous !== undefined &&
-        previous.id.localeCompare(reference.id) >= 0) ||
-      !current ||
-      current.kind !== reference.kind ||
-      current.revision !== reference.revision ||
-      statusRank[reference.status] > statusRank[current.status] ||
-      !isCanonicalUtcTimestamp(reference.updatedAt) ||
-      Date.parse(reference.updatedAt) > Date.parse(current.updatedAt) ||
-      (reference.updatedAt === current.updatedAt &&
-        reference.status !== current.status) ||
-      (reference.revision !== comparison.beforeRevision &&
-        reference.revision !== comparison.afterRevision)
+    return "comparison evaluation state linkage differs";
+  const eligible = snapshot.evaluations
+    .filter(
+      (evaluation) =>
+        (evaluation.revision === comparison.beforeRevision ||
+          evaluation.revision === comparison.afterRevision) &&
+        Date.parse(evaluation.createdAt) <=
+          Date.parse(comparisonArtifact.createdAt),
     )
-      return "comparison evaluation references differ";
-    seen.add(reference.id);
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (
+    state.evaluations.length !== eligible.length ||
+    state.evaluations.some(
+      (evaluation, index) => evaluation.id !== eligible[index]?.id,
+    )
+  )
+    return "comparison consumed evaluation set differs";
+  const seen = new Set<string>();
+  for (const [index, historical] of state.evaluations.entries()) {
+    if (evaluationRecordError(historical) !== null)
+      return "comparison consumed evaluation state differs";
+    const previous = state.evaluations[index - 1];
+    const current = eligible[index];
+    const revision = revisionsByNumber.get(historical.revision);
+    const dataIssue = evaluationDataError(historical.kind, historical.data);
+    const statusIssue = dataIssue
+      ? null
+      : evaluationStatusError(
+          historical.status,
+          historical.kind,
+          historical.data as Record<string, unknown>,
+        );
+    const fixtureIssue =
+      revision && !dataIssue && !statusIssue
+        ? await canonicalEvaluationFixtureError(
+            historical,
+            blobs.get(revision.contentHash)!,
+          )
+        : null;
+    if (
+      seen.has(historical.id) ||
+      (previous !== undefined &&
+        previous.id.localeCompare(historical.id) >= 0) ||
+      !current ||
+      historical.workspaceId !== snapshot.workspace.id ||
+      !revision ||
+      historical.contentHash !== revision.contentHash ||
+      historical.createdAt !== current.createdAt ||
+      historical.kind !== current.kind ||
+      historical.revision !== current.revision ||
+      !sameJsonValue(historical.versions, current.versions) ||
+      statusRank[historical.status] > statusRank[current.status] ||
+      Date.parse(historical.updatedAt) > Date.parse(current.updatedAt) ||
+      Date.parse(historical.updatedAt) >
+        Date.parse(comparisonArtifact.createdAt) ||
+      dataIssue !== null ||
+      statusIssue !== null ||
+      fixtureIssue !== null ||
+      !evaluationEvidencePrecedes(historical, current)
+    )
+      return "comparison consumed evaluation state differs";
+    seen.add(historical.id);
   }
   return null;
 }
 
 function comparisonEvaluationSnapshotHash(
-  references: CompareArtifact["evaluationReferences"],
+  evaluations: readonly EvaluationRecord[],
 ): Promise<string> {
-  return sha256(JSON.stringify(references));
+  return sha256(JSON.stringify(evaluations));
+}
+
+function evaluationReference(
+  evaluation: EvaluationRecord,
+): CompareArtifact["evaluationReferences"][number] {
+  const { id, kind, revision, status, updatedAt } = evaluation;
+  return { id, kind, revision, status, updatedAt };
+}
+
+function evaluationEvidencePrecedes(
+  historical: EvaluationRecord,
+  current: EvaluationRecord,
+): boolean {
+  if (historical.updatedAt === current.updatedAt)
+    return sameJsonValue(historical, current);
+  if (historical.kind === "triggering") {
+    const before = historical.data as TriggeringRunData;
+    const after = current.data as TriggeringRunData;
+    return (
+      sameJsonValue(before.cases, after.cases) &&
+      before.observations.length <= after.observations.length &&
+      before.observations.every((value, index) =>
+        sameJsonValue(value, after.observations[index]),
+      )
+    );
+  }
+  if (historical.kind === "test-run") {
+    const before = historical.data as TestRunData;
+    const after = current.data as TestRunData;
+    return (
+      sameJsonValue(
+        testRunFixture(before.contract, before.responseSchema),
+        testRunFixture(after.contract, after.responseSchema),
+      ) &&
+      before.transcript.length <= after.transcript.length &&
+      before.transcript.every((value, index) =>
+        sameJsonValue(value, after.transcript[index]),
+      )
+    );
+  }
+  return false;
 }
 
 async function canonicalEvaluationFixtureError(
@@ -1187,6 +1343,8 @@ async function canonicalEvaluationFixtureError(
 }
 
 function snapshotMutationFailure(error: unknown): Result<never> {
+  if (error instanceof DomainMutationError)
+    return { ok: false, error: error.domainError };
   if (error instanceof PortableSnapshotSizeError)
     return { ok: false, error: error.domainError };
   throw error;
@@ -1552,6 +1710,15 @@ function artifactDataError(
         return "structure section is invalid.";
     return null;
   }
+  if (kind === "comparison-evaluation-state") {
+    if (
+      data.kind !== "comparison-evaluation-state" ||
+      typeof data.comparisonId !== "string" ||
+      !Array.isArray(data.evaluations)
+    )
+      return "comparison evaluation state fields are incomplete.";
+    return null;
+  }
   if (
     data.kind !== "compare" ||
     !Number.isInteger(data.beforeRevision) ||
@@ -1566,6 +1733,7 @@ function artifactDataError(
     lintSummaryError(data.lint.before) !== null ||
     lintSummaryError(data.lint.after) !== null ||
     !Array.isArray(data.evaluationReferences) ||
+    typeof data.evaluationStateId !== "string" ||
     typeof data.evaluationSnapshotHash !== "string"
   )
     return "compare artifact fields are incomplete.";
@@ -1598,6 +1766,7 @@ function artifactRecordError(value: unknown): string | null {
       "instruction-map",
       "instruction-load",
       "compare",
+      "comparison-evaluation-state",
     ].includes(value.kind as string) ||
     typeof value.version !== "string" ||
     !isCanonicalUtcTimestamp(value.createdAt) ||

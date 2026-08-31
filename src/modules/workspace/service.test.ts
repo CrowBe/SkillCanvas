@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
-import { SNAPSHOT_MAX_BYTES, byteLength } from "../shared";
+import { SNAPSHOT_MAX_BYTES, byteLength, sha256 } from "../shared";
 import { EMPTY_SKILL } from "../skill";
 import { MemoryWorkspaceStore } from "./memory-store";
 import { createWorkspaceService } from "./service";
@@ -497,6 +497,36 @@ describe("WorkspaceService schema and submission guards", () => {
     expect(stringProperties.ok).toBe(false);
   });
 
+  it("rejects deeply nested live schemas with a domain result", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const schema: Record<string, unknown> = { type: "string" };
+    let current = schema;
+    for (let depth = 0; depth < 1000; depth += 1) {
+      const child: Record<string, unknown> = { type: "array" };
+      current.type = "array";
+      current.items = child;
+      current = child;
+    }
+
+    const result = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      {
+        contract: {
+          name: "deep_schema",
+          description: "Exercise bounded admission",
+          inputSchema: schema,
+          outputSchema: { type: "object" },
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("invalid_submission");
+  });
+
   it("returns a typed error for a triggering submission without a rationale", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });
@@ -583,7 +613,7 @@ describe("snapshot import schema guards", () => {
       ).toBeDefined();
   });
 
-  it("rejects omitted comparison evaluation evidence", async () => {
+  it("rejects self-authored empty comparison evaluation evidence", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
@@ -602,9 +632,15 @@ describe("snapshot import schema guards", () => {
     const exported = await source.exportSnapshot(id);
     if (!exported.ok) throw new Error(exported.error.message);
     const snapshot = JSON.parse(exported.value);
-    snapshot.artifacts.find(
+    const comparison = snapshot.artifacts.find(
       (item: any) => item.kind === "compare",
-    ).data.evaluationReferences = [];
+    );
+    const evaluationState = snapshot.artifacts.find(
+      (item: any) => item.kind === "comparison-evaluation-state",
+    );
+    comparison.data.evaluationReferences = [];
+    comparison.data.evaluationSnapshotHash = await sha256(JSON.stringify([]));
+    evaluationState.data.evaluations = [];
 
     const imported = await createWorkspaceService(
       new MemoryWorkspaceStore(),
