@@ -162,6 +162,7 @@ describe("WebMCP adapter", () => {
 
   it("unregisters live mocks when loaded state is terminal", async () => {
     let mockSignal: AbortSignal | undefined;
+    const statuses: string[] = [];
     const context = {
       registerTool: vi.fn(
         async (tool: WebMcpTool, options?: { signal?: AbortSignal }) => {
@@ -189,6 +190,8 @@ describe("WebMCP adapter", () => {
       service,
       appearance: appearance(),
       selection: { get: () => created.value.workspace.id, set: vi.fn() },
+      onMockRegistrationChange: (_evaluationId, status) =>
+        statuses.push(status),
     });
     await registration.registerMock(
       created.value.workspace.id,
@@ -207,10 +210,12 @@ describe("WebMCP adapter", () => {
     ]);
 
     expect(mockSignal?.aborted).toBe(true);
+    expect(statuses.at(-1)).toBe("completed");
   });
 
   it("unregisters mocks absent from or owned by another loaded workspace", async () => {
     const signals: AbortSignal[] = [];
+    const statuses: string[] = [];
     const context = {
       registerTool: vi.fn(
         async (tool: WebMcpTool, options?: { signal?: AbortSignal }) => {
@@ -228,6 +233,8 @@ describe("WebMCP adapter", () => {
       service,
       appearance: appearance(),
       selection: { get: () => first.value.workspace.id, set: vi.fn() },
+      onMockRegistrationChange: (_evaluationId, status) =>
+        statuses.push(status),
     });
     await registration.registerMock(
       first.value.workspace.id,
@@ -236,6 +243,7 @@ describe("WebMCP adapter", () => {
     );
     registration.reconcileMockRegistrations(first.value.workspace.id, []);
     expect(signals[0]?.aborted).toBe(true);
+    expect(statuses.at(-1)).toBe("unavailable");
 
     await registration.registerMock(
       first.value.workspace.id,
@@ -244,6 +252,7 @@ describe("WebMCP adapter", () => {
     );
     registration.reconcileMockRegistrations(second.value.workspace.id, []);
     expect(signals[1]?.aborted).toBe(true);
+    expect(statuses.at(-1)).toBe("unavailable");
   });
 
   it("returns a prepared run with manual fallback when mock registration fails", async () => {

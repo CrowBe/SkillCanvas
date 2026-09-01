@@ -29,6 +29,12 @@ import type {
   WorkspaceRecord,
 } from "./modules/workspace/types";
 import {
+  REFERENCE_MAX_BYTES,
+  REFERENCES_MAX,
+  SKILL_MAX_BYTES,
+  SNAPSHOT_MAX_BYTES,
+} from "./modules/shared";
+import {
   registerWebMcpTools,
   type MockRegistrationStatus,
 } from "./modules/webmcp";
@@ -90,6 +96,30 @@ const RESPONSE_SCHEMA = {
   properties: { themes: { type: "array", items: { type: "string" } } },
   required: ["themes"],
 } as const;
+
+async function readExactUtf8(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xef &&
+    bytes[1] === 0xbb &&
+    bytes[2] === 0xbf
+  )
+    throw new Error(`${file.name} uses an unsupported UTF-8 byte-order mark.`);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`${file.name} is not valid UTF-8.`);
+  }
+  const encoded = new TextEncoder().encode(text);
+  if (
+    encoded.length !== bytes.length ||
+    encoded.some((byte, index) => byte !== bytes[index])
+  )
+    throw new Error(`${file.name} cannot be imported byte-exactly.`);
+  return text;
+}
 
 export function App({
   workspaceService = service,
@@ -269,20 +299,49 @@ export function App({
     else setStatus(result.error.message);
   }
   async function createFromFiles(files: readonly File[]) {
-    const entries = await Promise.all(
-      files.map(async (file) => ({
-        path: file.webkitRelativePath || file.name,
-        content: await file.text(),
-      })),
-    );
-    const skillFiles = entries.filter(
-      (entry) => entry.path.split("/").at(-1)?.toLowerCase() === "skill.md",
+    if (files.length > REFERENCES_MAX + 1) {
+      setStatus(
+        `Import at most one SKILL.md and ${REFERENCES_MAX} reference files.`,
+      );
+      return;
+    }
+    const skillFiles = files.filter(
+      (file) =>
+        (file.webkitRelativePath || file.name)
+          .split("/")
+          .at(-1)
+          ?.toLowerCase() === "skill.md",
     );
     if (skillFiles.length !== 1) {
       setStatus("Import exactly one SKILL.md with its reference files.");
       return;
     }
-    const skill = skillFiles[0]!;
+    const skillFile = skillFiles[0]!;
+    if (skillFile.size > SKILL_MAX_BYTES) {
+      setStatus(`SKILL.md exceeds ${SKILL_MAX_BYTES} bytes.`);
+      return;
+    }
+    const oversizedReference = files.find(
+      (file) => file !== skillFile && file.size > REFERENCE_MAX_BYTES,
+    );
+    if (oversizedReference) {
+      setStatus(
+        `${oversizedReference.name} exceeds ${REFERENCE_MAX_BYTES} bytes.`,
+      );
+      return;
+    }
+    const selectedBytes = files.reduce((total, file) => total + file.size, 0);
+    if (selectedBytes > SNAPSHOT_MAX_BYTES) {
+      setStatus(`Selected files exceed ${SNAPSHOT_MAX_BYTES} bytes.`);
+      return;
+    }
+    const entries: { path: string; content: string }[] = [];
+    for (const file of files)
+      entries.push({
+        path: file.webkitRelativePath || file.name,
+        content: await readExactUtf8(file),
+      });
+    const skill = entries[files.indexOf(skillFile)]!;
     const root = skill.path.slice(0, -"SKILL.md".length);
     const references = entries
       .filter((entry) => entry !== skill && entry.path.startsWith(root))
@@ -479,11 +538,17 @@ export function App({
         result.value,
         "application/json",
       );
-      setStatus("Versioned workbench snapshot exported.");
+      setStatus(
+        "Workbench snapshot exported. Evaluation and comparison evidence is retained in the file but must be regenerated locally before import.",
+      );
     } else setStatus(result.error.message);
   }
   async function importWorkbenchSnapshot(file: File) {
-    const json = await file.text();
+    if (file.size > SNAPSHOT_MAX_BYTES) {
+      setStatus(`Snapshot exceeds ${SNAPSHOT_MAX_BYTES} bytes.`);
+      return;
+    }
+    const json = await readExactUtf8(file);
     const inspection = await workspaceService.inspectSnapshotImport(json);
     if (!inspection.ok) {
       setStatus(inspection.error.message);
@@ -497,7 +562,7 @@ export function App({
         return;
       }
       const confirmed = window.confirm(
-        `Replace saved workspace “${existingName}” with incoming snapshot “${inspection.value.incomingWorkspace.name}”? This will permanently replace the saved workspace's local revisions and evidence.`,
+          `Replace saved workspace “${existingName}” with incoming snapshot “${inspection.value.incomingWorkspace.name}”? This will permanently replace the saved workspace's local revisions and locally importable artifacts.`,
       );
       if (!confirmed) {
         setStatus(

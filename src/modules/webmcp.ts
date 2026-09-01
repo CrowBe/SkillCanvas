@@ -582,26 +582,32 @@ export async function registerWebMcpTools(
     runtime.onMockRegistrationChange?.(evaluationId, "registered");
     return name;
   };
-  const unregisterMock = (evaluationId: string) => {
+  const removeMock = (
+    evaluationId: string,
+    status: Exclude<MockRegistrationStatus, "registered">,
+  ) => {
     mockControllers.get(evaluationId)?.controller.abort();
     mockControllers.delete(evaluationId);
-    runtime.onMockRegistrationChange?.(evaluationId, "completed");
+    runtime.onMockRegistrationChange?.(evaluationId, status);
   };
+  const unregisterMock = (evaluationId: string) =>
+    removeMock(evaluationId, "completed");
   const reconcileMockRegistrations = (
     workspaceId: string | null,
     evaluations: readonly EvaluationRecord[],
   ) => {
-    const liveIds = new Set(
-      evaluations
-        .filter((evaluation) => evaluation.status !== "complete")
-        .map((evaluation) => evaluation.id),
+    const loadedById = new Map(
+      evaluations.map((evaluation) => [evaluation.id, evaluation]),
     );
     for (const [evaluationId, registration] of mockControllers)
-      if (
-        registration.workspaceId !== workspaceId ||
-        !liveIds.has(evaluationId)
-      )
-        unregisterMock(evaluationId);
+      if (registration.workspaceId !== workspaceId)
+        removeMock(evaluationId, "unavailable");
+      else {
+        const loaded = loadedById.get(evaluationId);
+        if (!loaded) removeMock(evaluationId, "unavailable");
+        else if (loaded.status === "complete")
+          removeMock(evaluationId, "completed");
+      }
   };
   const tools = createToolHandlers({
     ...runtime,

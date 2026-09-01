@@ -126,9 +126,9 @@ Appearance is a browser preference, not workspace content. It is excluded from r
 
 ## Import, export, and trust limits
 
-Skill/reference imports reject absolute or traversal paths, duplicate normalized paths, too many files, and excessive byte sizes. Imported content is never executed. Snapshot import additionally enforces a global byte limit, schema version, blob hash/size integrity, and linear revision lineage.
+Skill/reference imports preflight file counts and byte sizes before reading, require byte-exact UTF-8 without a byte-order mark, and reject absolute or traversal paths, duplicate normalized paths, too many files, and excessive byte sizes. Imported content is never executed. Snapshot import additionally enforces a global byte limit, schema version, canonical record identities, blob hash/size integrity, and linear revision lineage.
 
-Standard-native export contains only `SKILL.md` and reference paths. The workbench snapshot is a separate JSON artifact with revisions, blobs, maps, fixtures, evidence, and audit events.
+Standard-native export contains only `SKILL.md` and reference paths. The workbench snapshot is a separate JSON artifact that can retain local revisions, blobs, maps, evidence, and audit events. Admission rejects snapshots containing evaluation or comparison evidence because importer-authored deterministic records have no trusted provenance; Skill content, references, revisions, and other locally recomputable artifacts remain importable, and rejected evidence must be regenerated locally.
 
 ## Deferred scope
 

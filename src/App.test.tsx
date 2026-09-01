@@ -9,7 +9,6 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelContextAdapter, WebMcpTool } from "./modules/webmcp";
 import { EMPTY_SKILL } from "./modules/skill";
-import { sha256 } from "./modules/shared";
 import { MemoryWorkspaceStore } from "./modules/workspace/memory-store";
 import { createWorkspaceService } from "./modules/workspace/service";
 
@@ -28,23 +27,16 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-async function retimeEvaluation(
-  snapshot: any,
-  evaluation: any,
-  timestamp: string,
-) {
-  evaluation.createdAt = timestamp;
-  evaluation.updatedAt = timestamp;
-  for (const artifact of snapshot.artifacts.filter(
-    (item: any) =>
-      item.kind === "evaluation-transition" &&
-      item.data.evaluationId === evaluation.id,
-  )) {
-    artifact.createdAt = timestamp;
-    artifact.data.state.createdAt = timestamp;
-    artifact.data.state.updatedAt = timestamp;
-    artifact.data.stateHash = await sha256(JSON.stringify(artifact.data.state));
-  }
+function exactFile(
+  content: string | Uint8Array,
+  name: string,
+  type?: string,
+): File {
+  const bytes =
+    typeof content === "string" ? new TextEncoder().encode(content) : content;
+  return Object.assign(new File([bytes], name, { type }), {
+    arrayBuffer: async () => Uint8Array.from(bytes).buffer,
+  });
 }
 
 describe("App WebMCP registration lifecycle", () => {
@@ -157,11 +149,10 @@ describe("App WebMCP registration lifecycle", () => {
     const target = createWorkspaceService(new MemoryWorkspaceStore());
     const { App } = await import("./App");
     render(<App workspaceService={target} />);
-    const file = Object.assign(
-      new File([exported.value], "workspace.json", {
-        type: "application/json",
-      }),
-      { text: async () => exported.value },
+    const file = exactFile(
+      exported.value,
+      "workspace.json",
+      "application/json",
     );
     fireEvent.change(screen.getByLabelText("Import workbench snapshot"), {
       target: { files: [file] },
@@ -177,12 +168,8 @@ describe("App WebMCP registration lifecycle", () => {
     const createSpy = vi.spyOn(workspaceService, "create");
     const { App } = await import("./App");
     render(<App workspaceService={workspaceService} />);
-    const skill = Object.assign(new File([EMPTY_SKILL], "SKILL.md"), {
-      text: async () => EMPTY_SKILL,
-    });
-    const reference = Object.assign(new File(["Reference body"], "guide.md"), {
-      text: async () => "Reference body",
-    });
+    const skill = exactFile(EMPTY_SKILL, "SKILL.md");
+    const reference = exactFile("Reference body", "guide.md");
     fireEvent.change(screen.getByLabelText("Import SKILL.md"), {
       target: { files: [skill, reference] },
     });
@@ -194,6 +181,64 @@ describe("App WebMCP registration lifecycle", () => {
         referenceFiles: [{ path: "guide.md", content: "Reference body" }],
       }),
     );
+  });
+
+  it("preflights selected file bounds before reading any bytes", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    const read = vi.fn(async () => {
+      throw new Error("must not read");
+    });
+    const oversized = {
+      name: "SKILL.md",
+      webkitRelativePath: "",
+      size: 256 * 1024 + 1,
+      arrayBuffer: read,
+    } as unknown as File;
+
+    fireEvent.change(screen.getByLabelText("Import SKILL.md"), {
+      target: { files: [oversized] },
+    });
+
+    expect(await screen.findByText(/SKILL\.md exceeds/)).toBeInTheDocument();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-exact UTF-8 before creating a workspace", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const createSpy = vi.spyOn(workspaceService, "create");
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    const malformed = exactFile(new Uint8Array([0xc3, 0x28]), "SKILL.md");
+
+    fireEvent.change(screen.getByLabelText("Import SKILL.md"), {
+      target: { files: [malformed] },
+    });
+
+    expect(await screen.findByText(/not valid UTF-8/)).toBeInTheDocument();
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("preflights snapshot size before reading its bytes", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    const read = vi.fn(async () => {
+      throw new Error("must not read");
+    });
+    const oversized = {
+      name: "workspace.json",
+      size: 4 * 1024 * 1024 + 1,
+      arrayBuffer: read,
+    } as unknown as File;
+
+    fireEvent.change(screen.getByLabelText("Import workbench snapshot"), {
+      target: { files: [oversized] },
+    });
+
+    expect(await screen.findByText(/Snapshot exceeds/)).toBeInTheDocument();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("warns before replacing a saved workspace snapshot", async () => {
@@ -210,12 +255,7 @@ describe("App WebMCP registration lifecycle", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const { App } = await import("./App");
     render(<App workspaceService={workspaceService} />);
-    const file = Object.assign(
-      new File([exported.value], "workspace.json", {
-        type: "application/json",
-      }),
-      { text: async () => incomingJson },
-    );
+    const file = exactFile(incomingJson, "workspace.json", "application/json");
     fireEvent.change(screen.getByLabelText("Import workbench snapshot"), {
       target: { files: [file] },
     });
@@ -298,23 +338,27 @@ describe("App WebMCP registration lifecycle", () => {
     );
     if (!triggering.ok || !testRun.ok)
       throw new Error("evaluation preparation failed");
-    const exported = await source.exportSnapshot(created.value.workspace.id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const older = snapshot.evaluations.find(
-      (evaluation: any) => evaluation.kind === "triggering",
-    );
-    const newer = snapshot.evaluations.find(
-      (evaluation: any) => evaluation.kind === "test-run",
-    );
-    await retimeEvaluation(snapshot, older, "2026-01-01T00:00:00.000Z");
-    await retimeEvaluation(snapshot, newer, "2026-02-01T00:00:00.000Z");
-    snapshot.evaluations = [newer, older];
-    const target = createWorkspaceService(new MemoryWorkspaceStore());
-    const imported = await target.importSnapshot(JSON.stringify(snapshot));
-    if (!imported.ok) throw new Error(imported.error.message);
+    const opened = await source.open(created.value.workspace.id);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const older = {
+      ...triggering.value,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const newer = {
+      ...testRun.value,
+      createdAt: "2026-02-01T00:00:00.000Z",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+    };
+    const workspaceService = {
+      ...source,
+      open: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { ...opened.value, evaluations: [newer, older] },
+      }),
+    };
     const { App } = await import("./App");
-    render(<App workspaceService={target} />);
+    render(<App workspaceService={workspaceService} />);
     fireEvent.click(
       await screen.findByRole("button", {
         name: /Evaluation order Revision 1/,

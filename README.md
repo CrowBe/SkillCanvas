@@ -31,8 +31,8 @@ Deploy `dist/` to any HTTPS static host. For a deployed WebMCP origin, enrol tha
 6. Prepare a triggering evaluation one case at a time, or a mocked test run driven by one Tool contract and optional Response schema.
 7. Compare revisions and export either:
    - a standard-native zip containing only `SKILL.md` and references; or
-   - a versioned workbench snapshot containing revisions, accepted maps, fixtures, evidence, and audit events.
-8. Restore a workbench snapshot from the welcome screen, history panel, or `workspace_snapshot_import` WebMCP tool.
+   - a versioned workbench snapshot containing revisions, accepted maps, local evidence, and audit events.
+8. Restore an evidence-free workbench snapshot from the welcome screen, history panel, or `workspace_snapshot_import` WebMCP tool. Snapshots containing evaluation or comparison evidence are rejected; import the Skill and references without that evidence and regenerate it locally.
 
 ## Architecture
 
@@ -136,7 +136,7 @@ Adapted for this browser-agent proof:
 - model-backed triggering is split into prepare/submit so the visiting browser agent performs selection;
 - test runs register a run-scoped mock through WebMCP when available and retain a visible manual invocation fallback;
 - hosted persistence uses browser IndexedDB rather than server persistence;
-- portable snapshots retain authored/evaluation evidence separately from the standard-native Skill export.
+- exported workbench snapshots retain local evidence separately from the standard-native Skill export, while snapshot admission rejects evaluation and comparison evidence that cannot cross the local trust boundary.
 
 Deliberately not copied:
 
@@ -146,7 +146,7 @@ Deliberately not copied:
 
 ## Known limitations
 
-- IndexedDB data is origin- and browser-profile-specific. Cross-device persistence requires exporting/importing a bounded workbench snapshot.
+- IndexedDB data is origin- and browser-profile-specific. Bounded evidence-free snapshots can move Skill content, references, revisions, and accepted maps; evaluation and comparison evidence must be regenerated locally.
 - The parser preserves unknown frontmatter values semantically; YAML comments and original formatting are not preserved after serialization.
 - The JSON Schema checker intentionally implements a small deterministic subset (`type`, `required`, `properties`, `items`, `enum`, `default`).
 - Source diff metadata is line-oriented rather than a full syntax-aware diff; pathological large regions are bounded and explicitly marked approximate.

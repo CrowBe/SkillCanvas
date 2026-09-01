@@ -910,6 +910,30 @@ async function validateSnapshotShape(
       "size_limit",
       "Snapshot record count exceeds the workbench bounds.",
     );
+  for (const evaluation of snapshot.evaluations) {
+    const issue = evaluationRecordError(evaluation);
+    if (issue)
+      return err(
+        "invalid_snapshot",
+        `Snapshot contains an invalid evaluation record: ${issue}`,
+      );
+  }
+  if (
+    snapshot.evaluations.length > 0 ||
+    snapshot.artifacts.some(
+      (artifact) =>
+        isSchemaObject(artifact) &&
+        [
+          "compare",
+          "comparison-evaluation-state",
+          "evaluation-transition",
+        ].includes(artifact.kind as string),
+    )
+  )
+    return err(
+      "invalid_snapshot",
+      "Snapshot imports cannot admit evaluation or comparison evidence. Import Skill and reference content without that evidence, then regenerate evaluations and comparisons locally.",
+    );
   const blobs = new Map<string, string>();
   for (const blob of snapshot.blobs) {
     if (
@@ -1657,8 +1681,8 @@ function evaluationStatusError(
 function evaluationRecordError(value: unknown): string | null {
   if (!isSchemaObject(value)) return "record must be an object.";
   if (
-    typeof value.id !== "string" ||
-    typeof value.workspaceId !== "string" ||
+    !hasCanonicalPrefixedId(value.id, "eval") ||
+    !hasCanonicalPrefixedId(value.workspaceId, "workspace") ||
     !Number.isInteger(value.revision) ||
     typeof value.contentHash !== "string" ||
     typeof value.kind !== "string" ||
@@ -1792,7 +1816,7 @@ function hasCanonicalArtifactId(artifact: ArtifactRecord): boolean {
 function workspaceRecordError(value: unknown): string | null {
   if (!isSchemaObject(value)) return "workspace must be an object.";
   if (
-    typeof value.id !== "string" ||
+    !hasCanonicalPrefixedId(value.id, "workspace") ||
     typeof value.name !== "string" ||
     !Number.isInteger(value.currentRevision) ||
     !isCanonicalUtcTimestamp(value.createdAt) ||
@@ -2022,8 +2046,8 @@ function artifactRecordError(value: unknown): string | null {
 function auditEventError(value: unknown): string | null {
   if (!isSchemaObject(value)) return "record must be an object.";
   if (
-    typeof value.id !== "string" ||
-    typeof value.workspaceId !== "string" ||
+    !hasCanonicalPrefixedId(value.id, "audit") ||
+    !hasCanonicalPrefixedId(value.workspaceId, "workspace") ||
     !isCanonicalUtcTimestamp(value.at) ||
     !["human", "webmcp", "system"].includes(value.actor as string) ||
     typeof value.action !== "string" ||
@@ -2038,6 +2062,16 @@ function isCanonicalUtcTimestamp(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const instant = new Date(value);
   return !Number.isNaN(instant.getTime()) && instant.toISOString() === value;
+}
+
+function hasCanonicalPrefixedId(value: unknown, prefix: string): boolean {
+  return (
+    typeof value === "string" &&
+    new RegExp(
+      `^${prefix}_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+      "i",
+    ).test(value)
+  );
 }
 
 function contractChecksMatch(

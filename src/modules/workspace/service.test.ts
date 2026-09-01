@@ -152,6 +152,51 @@ describe("WorkspaceService", () => {
     if (!malformed.ok) expect(malformed.error.code).toBe("invalid_snapshot");
   });
 
+  it("rejects noncanonical workspace, evaluation, and audit ids", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const exported = await source.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+
+    for (const mutate of [
+      (snapshot: any) => {
+        snapshot.workspace.id = "x";
+        snapshot.revisions[0].workspaceId = "x";
+        snapshot.auditEvents[0].workspaceId = "x";
+      },
+      (snapshot: any) => {
+        snapshot.auditEvents[0].id = "x";
+      },
+    ]) {
+      const snapshot = JSON.parse(exported.value);
+      mutate(snapshot);
+      const imported = await createWorkspaceService(
+        new MemoryWorkspaceStore(),
+      ).importSnapshot(JSON.stringify(snapshot));
+      expect(imported.ok).toBe(false);
+      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    }
+
+    const prepared = await source.prepareEvaluation(
+      created.value.workspace.id,
+      "triggering",
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const withEvaluation = await source.exportSnapshot(
+      created.value.workspace.id,
+    );
+    if (!withEvaluation.ok) throw new Error(withEvaluation.error.message);
+    const snapshot = JSON.parse(withEvaluation.value);
+    snapshot.evaluations[0].id = "x";
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
+    if (!imported.ok)
+      expect(imported.error.message).toContain("evaluation record");
+  });
+
   it("restores an earlier snapshot over the same workspace", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });
@@ -674,25 +719,24 @@ describe("snapshot import schema guards", () => {
     transition.data.stateHash = await sha256(
       JSON.stringify(transition.data.state),
     );
-    const importer = createWorkspaceService(new MemoryWorkspaceStore());
-    const imported = await importer.importSnapshot(JSON.stringify(snapshot));
-    if (!imported.ok) throw new Error(imported.error.message);
+    const localStore = new MemoryWorkspaceStore();
+    localStore.loadValidatedSnapshot(snapshot);
+    const importer = createWorkspaceService(localStore);
 
     const compared = await importer.compare(id, 1, 2);
     expect(compared.ok).toBe(true);
     if (compared.ok) expect(compared.value.evaluationReferences).toEqual([]);
     const roundTrip = await importer.exportSnapshot(id);
     if (!roundTrip.ok) throw new Error(roundTrip.error.message);
-    expect(
-      (
-        await createWorkspaceService(new MemoryWorkspaceStore()).importSnapshot(
-          roundTrip.value,
-        )
-      ).ok,
-    ).toBe(true);
+    const rejected = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(roundTrip.value);
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok)
+      expect(rejected.error.message).toContain("regenerate evaluations");
   });
 
-  it("preserves comparisons across later evaluation lifecycle changes", async () => {
+  it("rejects comparisons after later evaluation lifecycle changes", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
@@ -724,11 +768,9 @@ describe("snapshot import schema guards", () => {
       new MemoryWorkspaceStore(),
     ).importSnapshot(exported.value);
 
-    expect(imported.ok).toBe(true);
-    if (imported.ok)
-      expect(
-        imported.value.artifacts.find((item) => item.kind === "compare"),
-      ).toBeDefined();
+    expect(imported.ok).toBe(false);
+    if (!imported.ok)
+      expect(imported.error.message).toContain("regenerate evaluations");
   });
 
   it("rejects self-authored empty comparison evaluation evidence", async () => {
@@ -934,26 +976,13 @@ describe("snapshot import evaluation data guards", () => {
     return JSON.stringify(snapshot);
   }
 
-  it("imports a well-formed snapshot and still grades a triggering submission", async () => {
+  it("rejects well-formed imported evaluation evidence", async () => {
     const json = await snapshotWith(() => {});
     const importer = createWorkspaceService(new MemoryWorkspaceStore());
     const imported = await importer.importSnapshot(json);
-    expect(imported.ok).toBe(true);
-    if (!imported.ok) return;
-    const record = imported.value.evaluations.find(
-      (item) => item.kind === "triggering",
-    )!;
-    const caseId = (record.data as any).cases[0].id;
-    const graded = await importer.submitEvaluation(
-      imported.value.workspace.id,
-      record.id,
-      {
-        caseId,
-        selectedChoiceId: "candidate",
-        rationale: "Description matches.",
-      },
-    );
-    expect(graded.ok).toBe(true);
+    expect(imported.ok).toBe(false);
+    if (!imported.ok)
+      expect(imported.error.message).toContain("regenerate evaluations");
   });
 
   it("rejects a test-run evaluation whose transcript is missing", async () => {
@@ -1063,7 +1092,7 @@ describe("snapshot import evaluation data guards", () => {
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });
 
-  it("preserves completed agent evidence with canonical fixtures", async () => {
+  it("rejects completed agent evidence even with canonical fixtures", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
@@ -1093,9 +1122,9 @@ describe("snapshot import evaluation data guards", () => {
       new MemoryWorkspaceStore(),
     ).importSnapshot(exported.value);
 
-    expect(imported.ok).toBe(true);
-    if (imported.ok)
-      expect(imported.value.evaluations[0]?.data).toEqual(completed.value.data);
+    expect(imported.ok).toBe(false);
+    if (!imported.ok)
+      expect(imported.error.message).toContain("regenerate evaluations");
   });
 
   it("rejects noncanonical UTC timestamps", async () => {
