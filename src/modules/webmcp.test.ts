@@ -202,9 +202,48 @@ describe("WebMCP adapter", () => {
     );
     if (!completed.ok) throw new Error(completed.error.message);
 
-    registration.reconcileMockRegistrations([completed.value]);
+    registration.reconcileMockRegistrations(created.value.workspace.id, [
+      completed.value,
+    ]);
 
     expect(mockSignal?.aborted).toBe(true);
+  });
+
+  it("unregisters mocks absent from or owned by another loaded workspace", async () => {
+    const signals: AbortSignal[] = [];
+    const context = {
+      registerTool: vi.fn(
+        async (tool: WebMcpTool, options?: { signal?: AbortSignal }) => {
+          if (tool.name.startsWith("mock_") && options?.signal)
+            signals.push(options.signal);
+          return undefined;
+        },
+      ),
+    };
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const first = await service.create({ skillMd: EMPTY_SKILL });
+    const second = await service.create({ skillMd: EMPTY_SKILL });
+    if (!first.ok || !second.ok) throw new Error("workspace setup failed");
+    const registration = await registerWebMcpTools(context, {
+      service,
+      appearance: appearance(),
+      selection: { get: () => first.value.workspace.id, set: vi.fn() },
+    });
+    await registration.registerMock(
+      first.value.workspace.id,
+      "eval_removed",
+      "read_items",
+    );
+    registration.reconcileMockRegistrations(first.value.workspace.id, []);
+    expect(signals[0]?.aborted).toBe(true);
+
+    await registration.registerMock(
+      first.value.workspace.id,
+      "eval_prior_workspace",
+      "read_items",
+    );
+    registration.reconcileMockRegistrations(second.value.workspace.id, []);
+    expect(signals[1]?.aborted).toBe(true);
   });
 
   it("returns a prepared run with manual fallback when mock registration fails", async () => {
@@ -264,7 +303,12 @@ describe("WebMCP adapter", () => {
         },
       },
       appearance: appearance(),
-      selection: { get: () => current, set: (id) => { current = id; } },
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
       registerMockForRun,
     });
 

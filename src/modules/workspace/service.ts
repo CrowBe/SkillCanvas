@@ -164,6 +164,16 @@ type ComparisonEvaluationStateArtifact = {
   readonly kind: "comparison-evaluation-state";
   readonly comparisonId: string;
   readonly evaluations: readonly EvaluationStateRecord[];
+  readonly transitionIds: readonly string[];
+};
+
+type EvaluationTransitionArtifact = {
+  readonly kind: "evaluation-transition";
+  readonly evaluationId: string;
+  readonly sequence: number;
+  readonly previousTransitionId: string | null;
+  readonly state: EvaluationStateRecord;
+  readonly stateHash: string;
 };
 
 export function createWorkspaceService(
@@ -291,18 +301,36 @@ export function createWorkspaceService(
         after.value.referenceFiles.map((file) => file.path),
       );
       const source = lineDiff(before.value.skillMd, after.value.skillMd);
-      const createdAt = new Date().toISOString();
-      const evaluationStates = after.value.evaluations
-        .filter(
-          (evaluation) =>
-            evaluation.revision === beforeRevision ||
-            evaluation.revision === afterRevision,
-        )
-        .map(evaluationSnapshotState)
-        .sort((left, right) => left.id.localeCompare(right.id));
+      const createdAt = nextComparisonTimestamp(after.value.artifacts);
       const comparisonInstance = crypto.randomUUID();
       const comparisonId = `${artifactId(after.value, "compare")}:${comparisonInstance}`;
       const evaluationStateId = `${artifactId(after.value, "comparison-evaluation-state")}:${comparisonInstance}`;
+      const consumedTransitions = [
+        ...before.value.artifacts,
+        ...after.value.artifacts,
+      ]
+        .filter((item) => item.kind === "evaluation-transition")
+        .map((item) => ({
+          artifact: item,
+          data: item.data as EvaluationTransitionArtifact,
+        }))
+        .filter(
+          ({ data }) =>
+            Date.parse(data.state.createdAt) <= Date.parse(createdAt) &&
+            Date.parse(data.state.updatedAt) <= Date.parse(createdAt),
+        )
+        .sort(
+          (left, right) =>
+            left.data.evaluationId.localeCompare(right.data.evaluationId) ||
+            left.data.sequence - right.data.sequence,
+        )
+        .filter(
+          (candidate, index, all) =>
+            all[index + 1]?.data.evaluationId !== candidate.data.evaluationId,
+        );
+      const evaluationStates = consumedTransitions.map(
+        ({ data }) => data.state,
+      );
       const evaluationReferences = evaluationStates.map(evaluationReference);
       const data: CompareArtifact = {
         kind: "compare",
@@ -319,6 +347,7 @@ export function createWorkspaceService(
         kind: "comparison-evaluation-state",
         comparisonId,
         evaluations: evaluationStates,
+        transitionIds: consumedTransitions.map(({ artifact }) => artifact.id),
       };
       try {
         await store.updateArtifacts({
@@ -374,7 +403,11 @@ export function createWorkspaceService(
           "Capacity probes require an accepted instruction map and are deferred in this proof.",
         );
       try {
-        await store.recordEvaluationEvidence(evaluation);
+        await store.recordEvaluationEvidence(
+          evaluation,
+          undefined,
+          await evaluationTransitionArtifact(evaluation, 0),
+        );
       } catch (error) {
         return snapshotMutationFailure(error);
       }
@@ -407,9 +440,16 @@ export function createWorkspaceService(
               )
             : err("invalid_submission", "Unsupported evaluation kind.");
       if (!result.ok) return result;
-      const next = appendEvaluationHistory(result.value, evaluation);
+      const next = result.value;
       try {
-        await store.recordEvaluationEvidence(next, evaluation);
+        await store.recordEvaluationEvidence(
+          next,
+          evaluation,
+          await evaluationTransitionArtifact(
+            next,
+            evaluationTransitionSequence(next),
+          ),
+        );
       } catch (error) {
         return snapshotMutationFailure(error);
       }
@@ -425,9 +465,16 @@ export function createWorkspaceService(
         return err("evaluation_not_found", "Evaluation was not found.");
       const result = invokeMockTool(evaluation, input);
       if (!result.ok) return result;
-      const next = appendEvaluationHistory(result.value.record, evaluation);
+      const next = result.value.record;
       try {
-        await store.recordEvaluationEvidence(next, evaluation);
+        await store.recordEvaluationEvidence(
+          next,
+          evaluation,
+          await evaluationTransitionArtifact(
+            next,
+            evaluationTransitionSequence(next),
+          ),
+        );
       } catch (error) {
         return snapshotMutationFailure(error);
       }
@@ -594,6 +641,15 @@ function artifactId(
   kind: ArtifactRecord["kind"],
 ): string {
   return `${bundle.workspace.id}:${bundle.revision.revision}:${kind}`;
+}
+function nextComparisonTimestamp(artifacts: readonly ArtifactRecord[]): string {
+  const latest = artifacts
+    .filter((artifact) => artifact.kind === "compare")
+    .reduce(
+      (maximum, artifact) => Math.max(maximum, Date.parse(artifact.createdAt)),
+      Number.NEGATIVE_INFINITY,
+    );
+  return new Date(Math.max(Date.now(), latest + 1)).toISOString();
 }
 function parsedName(raw: string): string {
   const parsed = parseSkillMd(raw);
@@ -956,15 +1012,6 @@ async function validateSnapshotShape(
         "invalid_snapshot",
         `Evaluation ${evaluation.id} does not match its canonical fixture: ${fixtureIssue}`,
       );
-    const historyIssue = await evaluationHistoryError(
-      evaluation,
-      blobs.get(revision.contentHash)!,
-    );
-    if (historyIssue)
-      return err(
-        "invalid_snapshot",
-        `Evaluation ${evaluation.id} has invalid transition history: ${historyIssue}`,
-      );
   }
   for (const artifact of snapshot.artifacts) {
     const issue = artifactRecordError(artifact);
@@ -980,6 +1027,18 @@ async function validateSnapshotShape(
       return err(
         "invalid_snapshot",
         `Artifact ${artifact.id} is not linked to an imported revision.`,
+      );
+    if (
+      artifact.kind === "evaluation-transition" &&
+      !snapshot.evaluations.some(
+        (evaluation) =>
+          evaluation.id ===
+          (artifact.data as EvaluationTransitionArtifact).evaluationId,
+      )
+    )
+      return err(
+        "invalid_snapshot",
+        `Artifact ${artifact.id} is not linked to an imported evaluation.`,
       );
     if (!hasCanonicalArtifactId(artifact))
       return err(
@@ -1007,6 +1066,23 @@ async function validateSnapshotShape(
       return err(
         "invalid_snapshot",
         `Artifact ${artifact.id} does not match canonical analysis: ${deterministicIssue}`,
+      );
+  }
+  for (const evaluation of snapshot.evaluations) {
+    const transitionIssue = await evaluationTransitionsError(
+      evaluation,
+      snapshot.artifacts.filter(
+        (artifact) =>
+          artifact.kind === "evaluation-transition" &&
+          (artifact.data as EvaluationTransitionArtifact).evaluationId ===
+            evaluation.id,
+      ),
+      blobs.get(revisionsByNumber.get(evaluation.revision)!.contentHash)!,
+    );
+    if (transitionIssue)
+      return err(
+        "invalid_snapshot",
+        `Evaluation ${evaluation.id} has invalid transition history: ${transitionIssue}`,
       );
   }
   for (const revision of snapshot.revisions) {
@@ -1084,6 +1160,13 @@ async function deterministicArtifactError(
     return null;
   if (artifact.version !== RULESET_VERSION) return "ruleset version differs";
   const revision = revisionsByNumber.get(artifact.revision)!;
+  if (artifact.kind === "evaluation-transition") {
+    const transition = artifact.data as EvaluationTransitionArtifact;
+    return (await sha256(JSON.stringify(transition.state))) ===
+      transition.stateHash
+      ? null
+      : "evaluation transition hash differs";
+  }
   const skillMd = blobs.get(revision.contentHash)!;
   let expected: unknown;
   if (artifact.kind === "comparison-evaluation-state") {
@@ -1174,27 +1257,56 @@ async function comparisonEvaluationStateError(
 ): Promise<string | null> {
   const comparison = comparisonArtifact.data as CompareArtifact;
   const state = stateArtifact.data as ComparisonEvaluationStateArtifact;
+  const comparisonSuffix = comparisonArtifact.id.slice(
+    `${comparisonArtifact.workspaceId}:${comparisonArtifact.revision}:compare:`
+      .length,
+  );
+  const stateSuffix = stateArtifact.id.slice(
+    `${stateArtifact.workspaceId}:${stateArtifact.revision}:comparison-evaluation-state:`
+      .length,
+  );
   if (
     state.comparisonId !== comparisonArtifact.id ||
     comparison.evaluationStateId !== stateArtifact.id ||
     stateArtifact.revision !== comparisonArtifact.revision ||
     stateArtifact.createdAt !== comparisonArtifact.createdAt ||
-    stateArtifact.version !== comparisonArtifact.version
+    stateArtifact.version !== comparisonArtifact.version ||
+    comparisonSuffix !== stateSuffix
   )
     return "comparison evaluation state linkage differs";
-  const eligible = snapshot.evaluations
+  const eligibleTransitions = snapshot.artifacts
+    .filter((artifact) => artifact.kind === "evaluation-transition")
+    .map((artifact) => ({
+      artifact,
+      data: artifact.data as EvaluationTransitionArtifact,
+    }))
     .filter(
-      (evaluation) =>
-        (evaluation.revision === comparison.beforeRevision ||
-          evaluation.revision === comparison.afterRevision) &&
-        Date.parse(evaluation.createdAt) <=
+      ({ data }) =>
+        (data.state.revision === comparison.beforeRevision ||
+          data.state.revision === comparison.afterRevision) &&
+        Date.parse(data.state.createdAt) <=
+          Date.parse(comparisonArtifact.createdAt) &&
+        Date.parse(data.state.updatedAt) <=
           Date.parse(comparisonArtifact.createdAt),
     )
-    .sort((left, right) => left.id.localeCompare(right.id));
+    .sort(
+      (left, right) =>
+        left.data.evaluationId.localeCompare(right.data.evaluationId) ||
+        left.data.sequence - right.data.sequence,
+    )
+    .filter(
+      (candidate, index, all) =>
+        all[index + 1]?.data.evaluationId !== candidate.data.evaluationId,
+    );
+  const eligible = eligibleTransitions.map(({ data }) => data.state);
   if (
     state.evaluations.length !== eligible.length ||
+    state.transitionIds.length !== eligibleTransitions.length ||
     state.evaluations.some(
-      (evaluation, index) => evaluation.id !== eligible[index]?.id,
+      (evaluation, index) => !sameJsonValue(evaluation, eligible[index]),
+    ) ||
+    state.transitionIds.some(
+      (id, index) => id !== eligibleTransitions[index]?.artifact.id,
     )
   )
     return "comparison consumed evaluation set differs";
@@ -1234,16 +1346,7 @@ async function comparisonEvaluationStateError(
       dataIssue !== null ||
       statusIssue !== null ||
       fixtureIssue !== null ||
-      !sameJsonValue(
-        historical,
-        [...current.history, evaluationSnapshotState(current)]
-          .filter(
-            (transition) =>
-              Date.parse(transition.updatedAt) <=
-              Date.parse(comparisonArtifact.createdAt),
-          )
-          .at(-1),
-      )
+      !sameJsonValue(historical, current)
     )
       return "comparison consumed evaluation state differs";
     seen.add(historical.id);
@@ -1264,20 +1367,35 @@ function evaluationReference(
   return { id, kind, revision, status, updatedAt };
 }
 
-function evaluationSnapshotState(
-  evaluation: EvaluationRecord,
-): EvaluationStateRecord {
-  const { history: _history, ...state } = evaluation;
-  return state;
+function evaluationTransitionSequence(evaluation: EvaluationRecord): number {
+  if (evaluation.kind === "triggering")
+    return (evaluation.data as TriggeringRunData).observations.length;
+  const transcriptSteps = (evaluation.data as TestRunData).transcript.length;
+  return transcriptSteps / 2 + (evaluation.status === "complete" ? 1 : 0);
 }
 
-function appendEvaluationHistory(
-  next: EvaluationRecord,
-  previous: EvaluationRecord,
-): EvaluationRecord {
+async function evaluationTransitionArtifact(
+  evaluation: EvaluationRecord,
+  sequence: number,
+): Promise<ArtifactRecord> {
+  const base = `${evaluation.workspaceId}:${evaluation.revision}:evaluation-transition:${evaluation.id}`;
+  const state = structuredClone(evaluation);
+  const data: EvaluationTransitionArtifact = {
+    kind: "evaluation-transition",
+    evaluationId: evaluation.id,
+    sequence,
+    previousTransitionId: sequence === 0 ? null : `${base}:${sequence - 1}`,
+    state,
+    stateHash: await sha256(JSON.stringify(state)),
+  };
   return {
-    ...next,
-    history: [...previous.history, evaluationSnapshotState(previous)],
+    id: `${base}:${sequence}`,
+    workspaceId: evaluation.workspaceId,
+    revision: evaluation.revision,
+    kind: "evaluation-transition",
+    version: RULESET_VERSION,
+    createdAt: evaluation.updatedAt,
+    data,
   };
 }
 
@@ -1553,17 +1671,29 @@ function evaluationRecordError(value: unknown): string | null {
   return null;
 }
 
-async function evaluationHistoryError(
+async function evaluationTransitionsError(
   evaluation: EvaluationRecord,
+  artifacts: readonly ArtifactRecord[],
   skillMd: string,
 ): Promise<string | null> {
-  if (!Array.isArray(evaluation.history)) return "history must be an array.";
-  const transitions = [
-    ...evaluation.history,
-    evaluationSnapshotState(evaluation),
-  ];
+  const sortedArtifacts = [...artifacts].sort(
+    (left, right) =>
+      (left.data as EvaluationTransitionArtifact).sequence -
+      (right.data as EvaluationTransitionArtifact).sequence,
+  );
+  const transitions = sortedArtifacts.map(
+    (artifact) => (artifact.data as EvaluationTransitionArtifact).state,
+  );
+  if (transitions.length === 0) return "transition history is missing.";
   for (const [index, transition] of transitions.entries()) {
+    const artifact = sortedArtifacts[index]!;
+    const data = artifact.data as EvaluationTransitionArtifact;
+    const expectedPreviousId =
+      index === 0 ? null : sortedArtifacts[index - 1]!.id;
     if (
+      data.sequence !== index ||
+      data.previousTransitionId !== expectedPreviousId ||
+      artifact.createdAt !== transition.updatedAt ||
       evaluationRecordError(transition) !== null ||
       transition.id !== evaluation.id ||
       transition.workspaceId !== evaluation.workspaceId ||
@@ -1592,13 +1722,18 @@ async function evaluationHistoryError(
     if (previous && !evaluationTransitionFollows(previous, transition))
       return "transitions are not an append-only lifecycle.";
   }
-  return transitions[0]?.status === "prepared" ? null : "history must begin prepared.";
+  if (transitions[0]?.status !== "prepared")
+    return "history must begin prepared.";
+  return sameJsonValue(transitions.at(-1), evaluation)
+    ? null
+    : "current evaluation does not match its latest transition.";
 }
 
 function evaluationTransitionFollows(
   previous: EvaluationStateRecord,
   next: EvaluationStateRecord,
 ): boolean {
+  if (previous.status === "complete") return false;
   if (Date.parse(next.updatedAt) < Date.parse(previous.updatedAt)) return false;
   if (previous.kind === "triggering") {
     const before = previous.data as TriggeringRunData;
@@ -1635,10 +1770,22 @@ function evaluationTransitionFollows(
 
 function hasCanonicalArtifactId(artifact: ArtifactRecord): boolean {
   const base = `${artifact.workspaceId}:${artifact.revision}:${artifact.kind}`;
-  if (artifact.kind !== "compare" && artifact.kind !== "comparison-evaluation-state")
+  if (artifact.kind === "evaluation-transition") {
+    const data = artifact.data as Partial<EvaluationTransitionArtifact>;
+    return (
+      typeof data.evaluationId === "string" &&
+      Number.isInteger(data.sequence) &&
+      artifact.id === `${base}:${data.evaluationId}:${data.sequence}`
+    );
+  }
+  if (
+    artifact.kind !== "compare" &&
+    artifact.kind !== "comparison-evaluation-state"
+  )
     return artifact.id === base;
-  return new RegExp(`^${base}:[0-9a-f]{8}-[0-9a-f-]{27}$`, "i").test(
-    artifact.id,
+  if (!artifact.id.startsWith(`${base}:`)) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    artifact.id.slice(base.length + 1),
   );
 }
 
@@ -1790,9 +1937,28 @@ function artifactDataError(
     if (
       data.kind !== "comparison-evaluation-state" ||
       typeof data.comparisonId !== "string" ||
-      !Array.isArray(data.evaluations)
+      !Array.isArray(data.evaluations) ||
+      !Array.isArray(data.transitionIds) ||
+      data.transitionIds.some((id) => typeof id !== "string")
     )
       return "comparison evaluation state fields are incomplete.";
+    return null;
+  }
+  if (kind === "evaluation-transition") {
+    if (
+      data.kind !== "evaluation-transition" ||
+      typeof data.evaluationId !== "string" ||
+      !Number.isInteger(data.sequence) ||
+      (data.sequence as number) < 0 ||
+      (data.previousTransitionId !== null &&
+        typeof data.previousTransitionId !== "string") ||
+      evaluationRecordError(data.state) !== null ||
+      typeof data.stateHash !== "string"
+    )
+      return "evaluation transition fields are incomplete.";
+    const state = data.state as EvaluationStateRecord;
+    if (state.revision !== revision)
+      return "evaluation transition revision differs.";
     return null;
   }
   if (
@@ -1843,6 +2009,7 @@ function artifactRecordError(value: unknown): string | null {
       "instruction-load",
       "compare",
       "comparison-evaluation-state",
+      "evaluation-transition",
     ].includes(value.kind as string) ||
     typeof value.version !== "string" ||
     !isCanonicalUtcTimestamp(value.createdAt) ||

@@ -498,11 +498,17 @@ export async function registerWebMcpTools(
     evaluationId: string,
     contractName: string,
   ): Promise<string>;
-  reconcileMockRegistrations(evaluations: readonly EvaluationRecord[]): void;
+  reconcileMockRegistrations(
+    workspaceId: string | null,
+    evaluations: readonly EvaluationRecord[],
+  ): void;
   unregisterMockForRun(evaluationId: string): void;
 }> {
   const controller = new AbortController();
-  const mockControllers = new Map<string, AbortController>();
+  const mockControllers = new Map<
+    string,
+    { controller: AbortController; workspaceId: string }
+  >();
   const registerMock = async (
     workspaceId: string,
     evaluationId: string,
@@ -512,9 +518,14 @@ export async function registerWebMcpTools(
       runtime.onMockRegistrationChange?.(evaluationId, "unavailable");
       throw new Error("WebMCP is unavailable.");
     }
+    mockControllers.get(evaluationId)?.controller.abort();
+    mockControllers.delete(evaluationId);
     const name = `mock_${contractName.replace(/[^A-Za-z0-9_.-]/g, "_")}_${evaluationId.replace(/[^A-Za-z0-9]/g, "").slice(-12)}`;
     const registration = new AbortController();
-    mockControllers.set(evaluationId, registration);
+    mockControllers.set(evaluationId, {
+      controller: registration,
+      workspaceId,
+    });
     try {
       await context.registerTool(
         guardTool(
@@ -572,16 +583,25 @@ export async function registerWebMcpTools(
     return name;
   };
   const unregisterMock = (evaluationId: string) => {
-    mockControllers.get(evaluationId)?.abort();
+    mockControllers.get(evaluationId)?.controller.abort();
     mockControllers.delete(evaluationId);
     runtime.onMockRegistrationChange?.(evaluationId, "completed");
   };
   const reconcileMockRegistrations = (
+    workspaceId: string | null,
     evaluations: readonly EvaluationRecord[],
   ) => {
-    for (const evaluation of evaluations)
-      if (evaluation.status === "complete" && mockControllers.has(evaluation.id))
-        unregisterMock(evaluation.id);
+    const liveIds = new Set(
+      evaluations
+        .filter((evaluation) => evaluation.status !== "complete")
+        .map((evaluation) => evaluation.id),
+    );
+    for (const [evaluationId, registration] of mockControllers)
+      if (
+        registration.workspaceId !== workspaceId ||
+        !liveIds.has(evaluationId)
+      )
+        unregisterMock(evaluationId);
   };
   const tools = createToolHandlers({
     ...runtime,
@@ -612,7 +632,7 @@ export async function registerWebMcpTools(
     tools,
     dispose() {
       controller.abort();
-      mockControllers.forEach((item) => item.abort());
+      mockControllers.forEach((item) => item.controller.abort());
     },
     registerMock,
     reconcileMockRegistrations,

@@ -592,10 +592,104 @@ describe("snapshot import schema guards", () => {
     const exported = await service.exportSnapshot(id);
     if (!exported.ok) throw new Error(exported.error.message);
     const artifacts = JSON.parse(exported.value).artifacts;
-    expect(artifacts.filter((item: any) => item.kind === "compare")).toHaveLength(2);
     expect(
-      artifacts.filter((item: any) => item.kind === "comparison-evaluation-state"),
+      artifacts.filter((item: any) => item.kind === "compare"),
     ).toHaveLength(2);
+    expect(
+      artifacts.filter(
+        (item: any) => item.kind === "comparison-evaluation-state",
+      ),
+    ).toHaveLength(2);
+    const comparisons = artifacts.filter(
+      (item: any) => item.kind === "compare",
+    );
+    for (const comparison of comparisons) {
+      const state = artifacts.find(
+        (item: any) => item.id === comparison.data.evaluationStateId,
+      );
+      expect(comparison.id.split(":").at(-1)).toBe(state.id.split(":").at(-1));
+      expect(comparison.id).toMatch(
+        /:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+    }
+  });
+
+  it("rejects mismatched comparison instance identifiers", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const updated = await source.update({
+      workspaceId: created.value.workspace.id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const compared = await source.compare(created.value.workspace.id, 1, 2);
+    if (!compared.ok) throw new Error(compared.error.message);
+    const exported = await source.exportSnapshot(created.value.workspace.id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const state = snapshot.artifacts.find(
+      (item: any) => item.kind === "comparison-evaluation-state",
+    );
+    const replacement = crypto.randomUUID();
+    state.id = state.id.replace(/[^:]+$/, replacement);
+    snapshot.artifacts.find(
+      (item: any) => item.kind === "compare",
+    ).data.evaluationStateId = state.id;
+
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
+  });
+
+  it("excludes future evaluation transitions from new comparisons", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const updated = await source.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const prepared = await source.prepareEvaluation(id, "triggering");
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const exported = await source.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const future = "2099-01-01T00:00:00.000Z";
+    snapshot.evaluations[0].createdAt = future;
+    snapshot.evaluations[0].updatedAt = future;
+    const transition = snapshot.artifacts.find(
+      (item: any) => item.kind === "evaluation-transition",
+    );
+    transition.createdAt = future;
+    transition.data.state.createdAt = future;
+    transition.data.state.updatedAt = future;
+    transition.data.stateHash = await sha256(
+      JSON.stringify(transition.data.state),
+    );
+    const importer = createWorkspaceService(new MemoryWorkspaceStore());
+    const imported = await importer.importSnapshot(JSON.stringify(snapshot));
+    if (!imported.ok) throw new Error(imported.error.message);
+
+    const compared = await importer.compare(id, 1, 2);
+    expect(compared.ok).toBe(true);
+    if (compared.ok) expect(compared.value.evaluationReferences).toEqual([]);
+    const roundTrip = await importer.exportSnapshot(id);
+    if (!roundTrip.ok) throw new Error(roundTrip.error.message);
+    expect(
+      (
+        await createWorkspaceService(new MemoryWorkspaceStore()).importSnapshot(
+          roundTrip.value,
+        )
+      ).ok,
+    ).toBe(true);
   });
 
   it("preserves comparisons across later evaluation lifecycle changes", async () => {
@@ -700,11 +794,21 @@ describe("snapshot import schema guards", () => {
     const exported = await source.exportSnapshot(id);
     if (!exported.ok) throw new Error(exported.error.message);
     const snapshot = JSON.parse(exported.value);
-    const comparison = snapshot.artifacts.find((item: any) => item.kind === "compare");
+    const comparison = snapshot.artifacts.find(
+      (item: any) => item.kind === "compare",
+    );
     const state = snapshot.artifacts.find(
       (item: any) => item.id === comparison.data.evaluationStateId,
     );
-    state.data.evaluations = [snapshot.evaluations[0].history[0]];
+    const preparedTransition = snapshot.artifacts.find(
+      (item: any) =>
+        item.kind === "evaluation-transition" && item.data.sequence === 0,
+    );
+    const altered = structuredClone(snapshot.evaluations[0]);
+    altered.data.observations[0].rationale = "Importer-authored rationale.";
+    snapshot.evaluations[0] = altered;
+    state.data.evaluations = [altered];
+    state.data.transitionIds = [preparedTransition.id];
     comparison.data.evaluationReferences = state.data.evaluations.map(
       ({ id, kind, revision, status, updatedAt }: any) => ({
         id,

@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelContextAdapter, WebMcpTool } from "./modules/webmcp";
 import { EMPTY_SKILL } from "./modules/skill";
+import { sha256 } from "./modules/shared";
 import { MemoryWorkspaceStore } from "./modules/workspace/memory-store";
 import { createWorkspaceService } from "./modules/workspace/service";
 
@@ -26,6 +27,25 @@ afterEach(() => {
   delete document.modelContext;
   sessionStorage.clear();
 });
+
+async function retimeEvaluation(
+  snapshot: any,
+  evaluation: any,
+  timestamp: string,
+) {
+  evaluation.createdAt = timestamp;
+  evaluation.updatedAt = timestamp;
+  for (const artifact of snapshot.artifacts.filter(
+    (item: any) =>
+      item.kind === "evaluation-transition" &&
+      item.data.evaluationId === evaluation.id,
+  )) {
+    artifact.createdAt = timestamp;
+    artifact.data.state.createdAt = timestamp;
+    artifact.data.state.updatedAt = timestamp;
+    artifact.data.stateHash = await sha256(JSON.stringify(artifact.data.state));
+  }
+}
 
 describe("App WebMCP registration lifecycle", () => {
   it("reflects WebMCP-prepared mock lifecycle transitions in the panel", async () => {
@@ -287,8 +307,8 @@ describe("App WebMCP registration lifecycle", () => {
     const newer = snapshot.evaluations.find(
       (evaluation: any) => evaluation.kind === "test-run",
     );
-    older.createdAt = older.updatedAt = "2026-01-01T00:00:00.000Z";
-    newer.createdAt = newer.updatedAt = "2026-02-01T00:00:00.000Z";
+    await retimeEvaluation(snapshot, older, "2026-01-01T00:00:00.000Z");
+    await retimeEvaluation(snapshot, newer, "2026-02-01T00:00:00.000Z");
     snapshot.evaluations = [newer, older];
     const target = createWorkspaceService(new MemoryWorkspaceStore());
     const imported = await target.importSnapshot(JSON.stringify(snapshot));
@@ -304,6 +324,63 @@ describe("App WebMCP registration lifecycle", () => {
     expect(
       await screen.findByRole("button", { name: "Manual mock invocation" }),
     ).toBeInTheDocument();
+  });
+
+  it("loads the latest comparison deterministically", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ name: "Comparison order" });
+    if (!created.ok) throw new Error(created.error.message);
+    const makeComparison = (id: string, createdAt: string, score: number) => ({
+      id,
+      workspaceId: created.value.workspace.id,
+      revision: 1,
+      kind: "compare" as const,
+      version: "skill-canvas-rules/1",
+      createdAt,
+      data: {
+        kind: "compare",
+        beforeRevision: 1,
+        afterRevision: 1,
+        source: {
+          additions: 0,
+          deletions: 0,
+          changedLines: [],
+          approximate: false,
+        },
+        lint: {
+          before: { score, grade: "A", counts: { error: 0, warn: 0, info: 0 } },
+          after: { score, grade: "A", counts: { error: 0, warn: 0, info: 0 } },
+        },
+        evaluationReferences: [],
+        evaluationStateId: `${id}:state`,
+        evaluationSnapshotHash: "hash",
+      },
+    });
+    const opened = await source.open(created.value.workspace.id);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const workspaceService = {
+      ...source,
+      open: vi.fn().mockResolvedValue({
+        ok: true,
+        value: {
+          ...opened.value,
+          artifacts: [
+            makeComparison("newer", "2026-02-01T00:00:00.000Z", 92),
+            makeComparison("older", "2026-01-01T00:00:00.000Z", 41),
+          ],
+        },
+      }),
+    };
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService as any} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Comparison order Revision 1/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Compare/ }));
+    expect(await screen.findAllByText("92/100")).toHaveLength(2);
+    expect(screen.queryByText("41/100")).not.toBeInTheDocument();
   });
 
   it("compares evaluation timestamps as instants", async () => {

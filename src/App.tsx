@@ -5,7 +5,6 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import JSZip from "jszip";
 import {
   createBrowserAppearanceController,
   type AppearanceState,
@@ -92,20 +91,6 @@ const RESPONSE_SCHEMA = {
   required: ["themes"],
 } as const;
 
-async function skillEntriesFromZip(
-  file: File,
-): Promise<readonly { path: string; content: string }[]> {
-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
-  return Promise.all(
-    Object.values(zip.files)
-      .filter((entry) => !entry.dir)
-      .map(async (entry) => ({
-        path: entry.name,
-        content: await entry.async("string"),
-      })),
-  );
-}
-
 export function App({
   workspaceService = service,
 }: {
@@ -149,6 +134,7 @@ export function App({
     ReturnType<typeof registerWebMcpTools>
   > | null>(null);
   const loadedEvaluationsRef = useRef<readonly EvaluationRecord[]>([]);
+  const loadedWorkspaceIdRef = useRef<string | null>(null);
 
   useEffect(() => appearance.subscribe(setAppearanceState), []);
   useEffect(() => {
@@ -196,7 +182,10 @@ export function App({
           return;
         }
         registrationRef.current = registration;
-        registration.reconcileMockRegistrations(loadedEvaluationsRef.current);
+        registration.reconcileMockRegistrations(
+          loadedWorkspaceIdRef.current,
+          loadedEvaluationsRef.current,
+        );
         setWebMcp(registration.available ? "available" : "fallback");
       })
       .catch((error) => {
@@ -213,7 +202,11 @@ export function App({
 
   function loadBundle(next: WorkspaceBundle) {
     loadedEvaluationsRef.current = next.evaluations;
-    registrationRef.current?.reconcileMockRegistrations(next.evaluations);
+    loadedWorkspaceIdRef.current = next.workspace.id;
+    registrationRef.current?.reconcileMockRegistrations(
+      next.workspace.id,
+      next.evaluations,
+    );
     sessionStorage.setItem("skill-canvas:open-workspace", next.workspace.id);
     setBundle(next);
     setWorkspaces((current) => [
@@ -234,8 +227,14 @@ export function App({
         InstructionLoadVector | undefined) ?? null,
     );
     setCompare(
-      (next.artifacts.find((item) => item.kind === "compare")?.data as
-        CompareArtifact | undefined) ?? null,
+      ([...next.artifacts]
+        .filter((item) => item.kind === "compare")
+        .sort(
+          (left, right) =>
+            Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
+            left.id.localeCompare(right.id),
+        )
+        .at(-1)?.data as CompareArtifact | undefined) ?? null,
     );
     setEvaluation(
       [...next.evaluations]
@@ -270,15 +269,12 @@ export function App({
     else setStatus(result.error.message);
   }
   async function createFromFiles(files: readonly File[]) {
-    const entries =
-      files.length === 1 && files[0]!.name.toLowerCase().endsWith(".zip")
-        ? await skillEntriesFromZip(files[0]!)
-        : await Promise.all(
-            files.map(async (file) => ({
-              path: file.webkitRelativePath || file.name,
-              content: await file.text(),
-            })),
-          );
+    const entries = await Promise.all(
+      files.map(async (file) => ({
+        path: file.webkitRelativePath || file.name,
+        content: await file.text(),
+      })),
+    );
     const skillFiles = entries.filter(
       (entry) => entry.path.split("/").at(-1)?.toLowerCase() === "skill.md",
     );
@@ -290,7 +286,10 @@ export function App({
     const root = skill.path.slice(0, -"SKILL.md".length);
     const references = entries
       .filter((entry) => entry !== skill && entry.path.startsWith(root))
-      .map((entry) => ({ path: entry.path.slice(root.length), content: entry.content }));
+      .map((entry) => ({
+        path: entry.path.slice(root.length),
+        content: entry.content,
+      }));
     const result = await workspaceService.create({
       skillMd: skill.content,
       referenceFiles: references,
@@ -821,8 +820,20 @@ function Welcome({
             Import SKILL.md
             <input
               type="file"
-              accept=".md,.zip,text/markdown,application/zip"
+              accept=".md,text/markdown"
               multiple
+              onChange={(event) => {
+                const files = [...(event.target.files ?? [])];
+                if (files.length > 0) onFiles(files);
+              }}
+            />
+          </label>
+          <label className="file-button">
+            Import Skill directory
+            <input
+              type="file"
+              multiple
+              {...({ webkitdirectory: "" } as Record<string, string>)}
               onChange={(event) => {
                 const files = [...(event.target.files ?? [])];
                 if (files.length > 0) onFiles(files);

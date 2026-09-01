@@ -53,6 +53,7 @@ type PersistCondition =
       readonly kind: "evaluation";
       readonly record: EvaluationRecord;
       readonly expected?: EvaluationRecord;
+      readonly transition?: ArtifactRecord;
     }
   | { readonly kind: "audit"; readonly record: AuditEvent };
 
@@ -393,6 +394,21 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
           "revision_conflict",
           "Evaluation evidence changed in another browser tab.",
         );
+      if (condition.kind === "evaluation" && condition.transition) {
+        const existingTransition = await transaction
+          .objectStore("artifacts")
+          .get(condition.transition.id);
+        if (
+          existingTransition ||
+          condition.transition.workspaceId !== workspaceId ||
+          condition.transition.revision !== condition.record.revision ||
+          condition.transition.kind !== "evaluation-transition"
+        )
+          conflict = persistenceError(
+            "revision_conflict",
+            "Evaluation transition history changed in another browser tab.",
+          );
+      }
       if (!conflict) {
         if (condition.kind === "artifacts") {
           const deleted = await Promise.all(
@@ -416,6 +432,9 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
           ...records.map((record) =>
             transaction.objectStore(storeName).put(record),
           ),
+          ...(condition.kind === "evaluation" && condition.transition
+            ? [transaction.objectStore("artifacts").put(condition.transition)]
+            : []),
           ...(condition.kind === "artifacts"
             ? condition.deleteIds.map((id) =>
                 transaction.objectStore("artifacts").delete(id),
@@ -703,16 +722,19 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   async recordEvaluationEvidence(
     evaluation: EvaluationRecord,
     expected?: EvaluationRecord,
+    transition?: ArtifactRecord,
   ) {
     await this.hydrate();
     await this.commitMutation(
-      (staged) => staged.recordEvaluationEvidence(evaluation, expected),
+      (staged) =>
+        staged.recordEvaluationEvidence(evaluation, expected, transition),
       () => evaluation.workspaceId,
       evaluation.workspaceId,
       () => ({
         kind: "evaluation",
         record: evaluation,
         expected,
+        transition,
       }),
     );
   }

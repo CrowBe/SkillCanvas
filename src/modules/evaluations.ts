@@ -163,7 +163,6 @@ export async function prepareTriggering(
     createdAt: now,
     updatedAt: now,
     data: { ...fixture, observations: [] } satisfies TriggeringRunData,
-    history: [],
   };
 }
 
@@ -291,7 +290,6 @@ export async function prepareTestRun(
     createdAt: now,
     updatedAt: now,
     data,
-    history: [],
   };
 }
 

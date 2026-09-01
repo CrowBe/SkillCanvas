@@ -42,7 +42,8 @@ export type ArtifactRecord = {
     | "instruction-map"
     | "instruction-load"
     | "compare"
-    | "comparison-evaluation-state";
+    | "comparison-evaluation-state"
+    | "evaluation-transition";
   readonly version: string;
   readonly createdAt: string;
   readonly data: unknown;
@@ -68,9 +69,8 @@ export type EvaluationRecord = {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly data: unknown;
-  readonly history: readonly EvaluationStateRecord[];
 };
-export type EvaluationStateRecord = Omit<EvaluationRecord, "history">;
+export type EvaluationStateRecord = EvaluationRecord;
 export type WorkspaceBundle = {
   readonly evidenceGeneration: number;
   readonly workspace: WorkspaceRecord;
@@ -131,6 +131,7 @@ export interface WorkspaceStore {
   recordEvaluationEvidence(
     evaluation: EvaluationRecord,
     expected?: EvaluationRecord,
+    transition?: ArtifactRecord,
   ): Promise<void>;
   appendAuditEvent(event: AuditEvent): Promise<void>;
   exportSnapshot(workspaceId: string): Promise<WorkspaceSnapshot | DomainError>;
