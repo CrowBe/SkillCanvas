@@ -51,6 +51,7 @@ import type {
   AuditEvent,
   EvaluationKind,
   EvaluationRecord,
+  EvaluationStateRecord,
   WorkspaceBundle,
   WorkspaceRecord,
   WorkspaceReplacementTarget,
@@ -162,7 +163,7 @@ export type CompareArtifact = {
 type ComparisonEvaluationStateArtifact = {
   readonly kind: "comparison-evaluation-state";
   readonly comparisonId: string;
-  readonly evaluations: readonly EvaluationRecord[];
+  readonly evaluations: readonly EvaluationStateRecord[];
 };
 
 export function createWorkspaceService(
@@ -291,31 +292,18 @@ export function createWorkspaceService(
       );
       const source = lineDiff(before.value.skillMd, after.value.skillMd);
       const createdAt = new Date().toISOString();
-      const evaluationReferences = after.value.evaluations
-        .filter(
-          (evaluation) =>
-            evaluation.revision === beforeRevision ||
-            evaluation.revision === afterRevision,
-        )
-        .map(({ id, kind, revision, status, updatedAt }) => ({
-          id,
-          kind,
-          revision,
-          status,
-          updatedAt,
-        }))
-        .sort((left, right) => left.id.localeCompare(right.id));
-      const evaluationStateId = artifactId(
-        after.value,
-        "comparison-evaluation-state",
-      );
       const evaluationStates = after.value.evaluations
         .filter(
           (evaluation) =>
             evaluation.revision === beforeRevision ||
             evaluation.revision === afterRevision,
         )
+        .map(evaluationSnapshotState)
         .sort((left, right) => left.id.localeCompare(right.id));
+      const comparisonInstance = crypto.randomUUID();
+      const comparisonId = `${artifactId(after.value, "compare")}:${comparisonInstance}`;
+      const evaluationStateId = `${artifactId(after.value, "comparison-evaluation-state")}:${comparisonInstance}`;
+      const evaluationReferences = evaluationStates.map(evaluationReference);
       const data: CompareArtifact = {
         kind: "compare",
         beforeRevision,
@@ -329,7 +317,7 @@ export function createWorkspaceService(
       };
       const evaluationState: ComparisonEvaluationStateArtifact = {
         kind: "comparison-evaluation-state",
-        comparisonId: artifactId(after.value, "compare"),
+        comparisonId,
         evaluations: evaluationStates,
       };
       try {
@@ -339,12 +327,13 @@ export function createWorkspaceService(
           expectedContentHash: after.value.revision.contentHash,
           expectedGeneration: after.value.evidenceGeneration,
           artifacts: [
-            artifact(after.value, "compare", data, createdAt),
+            artifact(after.value, "compare", data, createdAt, comparisonId),
             artifact(
               after.value,
               "comparison-evaluation-state",
               evaluationState,
               createdAt,
+              evaluationStateId,
             ),
           ],
         });
@@ -418,12 +407,13 @@ export function createWorkspaceService(
               )
             : err("invalid_submission", "Unsupported evaluation kind.");
       if (!result.ok) return result;
+      const next = appendEvaluationHistory(result.value, evaluation);
       try {
-        await store.recordEvaluationEvidence(result.value, evaluation);
+        await store.recordEvaluationEvidence(next, evaluation);
       } catch (error) {
         return snapshotMutationFailure(error);
       }
-      return result;
+      return ok(next);
     },
     async invokeMock(workspaceId, evaluationId, input) {
       const bundle = await open(workspaceId);
@@ -435,13 +425,14 @@ export function createWorkspaceService(
         return err("evaluation_not_found", "Evaluation was not found.");
       const result = invokeMockTool(evaluation, input);
       if (!result.ok) return result;
+      const next = appendEvaluationHistory(result.value.record, evaluation);
       try {
-        await store.recordEvaluationEvidence(result.value.record, evaluation);
+        await store.recordEvaluationEvidence(next, evaluation);
       } catch (error) {
         return snapshotMutationFailure(error);
       }
       return ok({
-        evaluation: result.value.record,
+        evaluation: next,
         output: result.value.output,
       });
     },
@@ -586,9 +577,10 @@ function artifact(
   kind: ArtifactRecord["kind"],
   data: unknown,
   createdAt = new Date().toISOString(),
+  id = artifactId(bundle, kind),
 ): ArtifactRecord {
   return {
-    id: artifactId(bundle, kind),
+    id,
     workspaceId: bundle.workspace.id,
     revision: bundle.revision.revision,
     kind,
@@ -964,6 +956,15 @@ async function validateSnapshotShape(
         "invalid_snapshot",
         `Evaluation ${evaluation.id} does not match its canonical fixture: ${fixtureIssue}`,
       );
+    const historyIssue = await evaluationHistoryError(
+      evaluation,
+      blobs.get(revision.contentHash)!,
+    );
+    if (historyIssue)
+      return err(
+        "invalid_snapshot",
+        `Evaluation ${evaluation.id} has invalid transition history: ${historyIssue}`,
+      );
   }
   for (const artifact of snapshot.artifacts) {
     const issue = artifactRecordError(artifact);
@@ -980,10 +981,10 @@ async function validateSnapshotShape(
         "invalid_snapshot",
         `Artifact ${artifact.id} is not linked to an imported revision.`,
       );
-    if (artifact.id !== `${workspace.id}:${artifact.revision}:${artifact.kind}`)
+    if (!hasCanonicalArtifactId(artifact))
       return err(
         "invalid_snapshot",
-        `Artifact ${artifact.id} does not use its canonical singleton id.`,
+        `Artifact ${artifact.id} does not use its canonical id.`,
       );
     const artifactIssue = artifactDataError(
       artifact.kind,
@@ -1173,7 +1174,6 @@ async function comparisonEvaluationStateError(
 ): Promise<string | null> {
   const comparison = comparisonArtifact.data as CompareArtifact;
   const state = stateArtifact.data as ComparisonEvaluationStateArtifact;
-  const statusRank = { prepared: 0, "in-progress": 1, complete: 2 } as const;
   if (
     state.comparisonId !== comparisonArtifact.id ||
     comparison.evaluationStateId !== stateArtifact.id ||
@@ -1229,17 +1229,21 @@ async function comparisonEvaluationStateError(
       !revision ||
       historical.contentHash !== revision.contentHash ||
       historical.createdAt !== current.createdAt ||
-      historical.kind !== current.kind ||
-      historical.revision !== current.revision ||
-      !sameJsonValue(historical.versions, current.versions) ||
-      statusRank[historical.status] > statusRank[current.status] ||
-      Date.parse(historical.updatedAt) > Date.parse(current.updatedAt) ||
       Date.parse(historical.updatedAt) >
         Date.parse(comparisonArtifact.createdAt) ||
       dataIssue !== null ||
       statusIssue !== null ||
       fixtureIssue !== null ||
-      !evaluationEvidencePrecedes(historical, current)
+      !sameJsonValue(
+        historical,
+        [...current.history, evaluationSnapshotState(current)]
+          .filter(
+            (transition) =>
+              Date.parse(transition.updatedAt) <=
+              Date.parse(comparisonArtifact.createdAt),
+          )
+          .at(-1),
+      )
     )
       return "comparison consumed evaluation state differs";
     seen.add(historical.id);
@@ -1248,54 +1252,37 @@ async function comparisonEvaluationStateError(
 }
 
 function comparisonEvaluationSnapshotHash(
-  evaluations: readonly EvaluationRecord[],
+  evaluations: readonly EvaluationStateRecord[],
 ): Promise<string> {
   return sha256(JSON.stringify(evaluations));
 }
 
 function evaluationReference(
-  evaluation: EvaluationRecord,
+  evaluation: EvaluationStateRecord,
 ): CompareArtifact["evaluationReferences"][number] {
   const { id, kind, revision, status, updatedAt } = evaluation;
   return { id, kind, revision, status, updatedAt };
 }
 
-function evaluationEvidencePrecedes(
-  historical: EvaluationRecord,
-  current: EvaluationRecord,
-): boolean {
-  if (historical.updatedAt === current.updatedAt)
-    return sameJsonValue(historical, current);
-  if (historical.kind === "triggering") {
-    const before = historical.data as TriggeringRunData;
-    const after = current.data as TriggeringRunData;
-    return (
-      sameJsonValue(before.cases, after.cases) &&
-      before.observations.length <= after.observations.length &&
-      before.observations.every((value, index) =>
-        sameJsonValue(value, after.observations[index]),
-      )
-    );
-  }
-  if (historical.kind === "test-run") {
-    const before = historical.data as TestRunData;
-    const after = current.data as TestRunData;
-    return (
-      sameJsonValue(
-        testRunFixture(before.contract, before.responseSchema),
-        testRunFixture(after.contract, after.responseSchema),
-      ) &&
-      before.transcript.length <= after.transcript.length &&
-      before.transcript.every((value, index) =>
-        sameJsonValue(value, after.transcript[index]),
-      )
-    );
-  }
-  return false;
+function evaluationSnapshotState(
+  evaluation: EvaluationRecord,
+): EvaluationStateRecord {
+  const { history: _history, ...state } = evaluation;
+  return state;
+}
+
+function appendEvaluationHistory(
+  next: EvaluationRecord,
+  previous: EvaluationRecord,
+): EvaluationRecord {
+  return {
+    ...next,
+    history: [...previous.history, evaluationSnapshotState(previous)],
+  };
 }
 
 async function canonicalEvaluationFixtureError(
-  evaluation: EvaluationRecord,
+  evaluation: EvaluationStateRecord,
   skillMd: string,
 ): Promise<string | null> {
   if (evaluation.kind === "triggering") {
@@ -1564,6 +1551,95 @@ function evaluationRecordError(value: unknown): string | null {
   )
     return "required metadata is missing.";
   return null;
+}
+
+async function evaluationHistoryError(
+  evaluation: EvaluationRecord,
+  skillMd: string,
+): Promise<string | null> {
+  if (!Array.isArray(evaluation.history)) return "history must be an array.";
+  const transitions = [
+    ...evaluation.history,
+    evaluationSnapshotState(evaluation),
+  ];
+  for (const [index, transition] of transitions.entries()) {
+    if (
+      evaluationRecordError(transition) !== null ||
+      transition.id !== evaluation.id ||
+      transition.workspaceId !== evaluation.workspaceId ||
+      transition.revision !== evaluation.revision ||
+      transition.contentHash !== evaluation.contentHash ||
+      transition.kind !== evaluation.kind ||
+      transition.createdAt !== evaluation.createdAt ||
+      !sameJsonValue(transition.versions, evaluation.versions)
+    )
+      return "transition metadata differs.";
+    const dataIssue = evaluationDataError(transition.kind, transition.data);
+    const statusIssue = dataIssue
+      ? null
+      : evaluationStatusError(
+          transition.status,
+          transition.kind,
+          transition.data as Record<string, unknown>,
+        );
+    if (
+      dataIssue ||
+      statusIssue ||
+      (await canonicalEvaluationFixtureError(transition, skillMd))
+    )
+      return "transition evidence is invalid.";
+    const previous = transitions[index - 1];
+    if (previous && !evaluationTransitionFollows(previous, transition))
+      return "transitions are not an append-only lifecycle.";
+  }
+  return transitions[0]?.status === "prepared" ? null : "history must begin prepared.";
+}
+
+function evaluationTransitionFollows(
+  previous: EvaluationStateRecord,
+  next: EvaluationStateRecord,
+): boolean {
+  if (Date.parse(next.updatedAt) < Date.parse(previous.updatedAt)) return false;
+  if (previous.kind === "triggering") {
+    const before = previous.data as TriggeringRunData;
+    const after = next.data as TriggeringRunData;
+    return (
+      sameJsonValue(before.cases, after.cases) &&
+      after.observations.length === before.observations.length + 1 &&
+      before.observations.every((value, index) =>
+        sameJsonValue(value, after.observations[index]),
+      )
+    );
+  }
+  const before = previous.data as TestRunData;
+  const after = next.data as TestRunData;
+  if (
+    !sameJsonValue(
+      testRunFixture(before.contract, before.responseSchema),
+      testRunFixture(after.contract, after.responseSchema),
+    )
+  )
+    return false;
+  if (next.status === "in-progress")
+    return (
+      after.transcript.length === before.transcript.length + 2 &&
+      before.transcript.every((value, index) =>
+        sameJsonValue(value, after.transcript[index]),
+      )
+    );
+  return (
+    next.status === "complete" &&
+    sameJsonValue(before.transcript, after.transcript)
+  );
+}
+
+function hasCanonicalArtifactId(artifact: ArtifactRecord): boolean {
+  const base = `${artifact.workspaceId}:${artifact.revision}:${artifact.kind}`;
+  if (artifact.kind !== "compare" && artifact.kind !== "comparison-evaluation-state")
+    return artifact.id === base;
+  return new RegExp(`^${base}:[0-9a-f]{8}-[0-9a-f-]{27}$`, "i").test(
+    artifact.id,
+  );
 }
 
 function workspaceRecordError(value: unknown): string | null {

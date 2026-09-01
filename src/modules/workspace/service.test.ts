@@ -574,6 +574,30 @@ describe("WorkspaceService schema and submission guards", () => {
 });
 
 describe("snapshot import schema guards", () => {
+  it("appends a distinct immutable evidence state for every comparison", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const updated = await service.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    expect((await service.compare(id, 1, 2)).ok).toBe(true);
+    expect((await service.compare(id, 1, 2)).ok).toBe(true);
+
+    const exported = await service.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const artifacts = JSON.parse(exported.value).artifacts;
+    expect(artifacts.filter((item: any) => item.kind === "compare")).toHaveLength(2);
+    expect(
+      artifacts.filter((item: any) => item.kind === "comparison-evaluation-state"),
+    ).toHaveLength(2);
+  });
+
   it("preserves comparisons across later evaluation lifecycle changes", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
@@ -648,6 +672,56 @@ describe("snapshot import schema guards", () => {
 
     expect(imported.ok).toBe(false);
     if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+  });
+
+  it("rejects a comparison rewritten to an earlier evidence prefix", async () => {
+    const source = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await source.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const updated = await source.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!updated.ok) throw new Error(updated.error.message);
+    const prepared = await source.prepareEvaluation(id, "triggering");
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const firstCase = (prepared.value.data as any).cases[0];
+    const submitted = await source.submitEvaluation(id, prepared.value.id, {
+      caseId: firstCase.id,
+      selectedChoiceId: firstCase.choices[0].id,
+      rationale: "Capture a real transition.",
+    });
+    if (!submitted.ok) throw new Error(submitted.error.message);
+    const compared = await source.compare(id, 1, 2);
+    if (!compared.ok) throw new Error(compared.error.message);
+    const exported = await source.exportSnapshot(id);
+    if (!exported.ok) throw new Error(exported.error.message);
+    const snapshot = JSON.parse(exported.value);
+    const comparison = snapshot.artifacts.find((item: any) => item.kind === "compare");
+    const state = snapshot.artifacts.find(
+      (item: any) => item.id === comparison.data.evaluationStateId,
+    );
+    state.data.evaluations = [snapshot.evaluations[0].history[0]];
+    comparison.data.evaluationReferences = state.data.evaluations.map(
+      ({ id, kind, revision, status, updatedAt }: any) => ({
+        id,
+        kind,
+        revision,
+        status,
+        updatedAt,
+      }),
+    );
+    comparison.data.evaluationSnapshotHash = await sha256(
+      JSON.stringify(state.data.evaluations),
+    );
+
+    const imported = await createWorkspaceService(
+      new MemoryWorkspaceStore(),
+    ).importSnapshot(JSON.stringify(snapshot));
+    expect(imported.ok).toBe(false);
   });
 
   it("recomputes deterministic artifacts during snapshot admission", async () => {

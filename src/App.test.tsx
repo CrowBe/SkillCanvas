@@ -152,6 +152,30 @@ describe("App WebMCP registration lifecycle", () => {
     );
   });
 
+  it("imports SKILL.md together with selected reference files", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const createSpy = vi.spyOn(workspaceService, "create");
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    const skill = Object.assign(new File([EMPTY_SKILL], "SKILL.md"), {
+      text: async () => EMPTY_SKILL,
+    });
+    const reference = Object.assign(new File(["Reference body"], "guide.md"), {
+      text: async () => "Reference body",
+    });
+    fireEvent.change(screen.getByLabelText("Import SKILL.md"), {
+      target: { files: [skill, reference] },
+    });
+
+    expect(await screen.findByTestId("skill-hero")).toBeInTheDocument();
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skillMd: EMPTY_SKILL,
+        referenceFiles: [{ path: "guide.md", content: "Reference body" }],
+      }),
+    );
+  });
+
   it("warns before replacing a saved workspace snapshot", async () => {
     const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await workspaceService.create({ name: "Saved Workspace" });

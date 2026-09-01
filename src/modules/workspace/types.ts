@@ -68,7 +68,9 @@ export type EvaluationRecord = {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly data: unknown;
+  readonly history: readonly EvaluationStateRecord[];
 };
+export type EvaluationStateRecord = Omit<EvaluationRecord, "history">;
 export type WorkspaceBundle = {
   readonly evidenceGeneration: number;
   readonly workspace: WorkspaceRecord;

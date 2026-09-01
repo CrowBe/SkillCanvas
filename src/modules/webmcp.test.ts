@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createBrowserAppearanceController } from "./appearance";
+import { EMPTY_SKILL } from "./skill";
 import { MemoryWorkspaceStore } from "./workspace/memory-store";
 import { createWorkspaceService } from "./workspace/service";
 import {
@@ -159,6 +160,53 @@ describe("WebMCP adapter", () => {
     expect(mock.signal?.aborted).toBe(true);
   });
 
+  it("unregisters live mocks when loaded state is terminal", async () => {
+    let mockSignal: AbortSignal | undefined;
+    const context = {
+      registerTool: vi.fn(
+        async (tool: WebMcpTool, options?: { signal?: AbortSignal }) => {
+          if (tool.name.startsWith("mock_")) mockSignal = options?.signal;
+          return undefined;
+        },
+      ),
+    };
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const prepared = await service.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      {
+        contract: {
+          name: "read_items",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object" },
+        },
+      },
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    const registration = await registerWebMcpTools(context, {
+      service,
+      appearance: appearance(),
+      selection: { get: () => created.value.workspace.id, set: vi.fn() },
+    });
+    await registration.registerMock(
+      created.value.workspace.id,
+      prepared.value.id,
+      "read_items",
+    );
+    const completed = await service.submitEvaluation(
+      created.value.workspace.id,
+      prepared.value.id,
+      { finalOutput: {} },
+    );
+    if (!completed.ok) throw new Error(completed.error.message);
+
+    registration.reconcileMockRegistrations([completed.value]);
+
+    expect(mockSignal?.aborted).toBe(true);
+  });
+
   it("returns a prepared run with manual fallback when mock registration fails", async () => {
     let current: string | null = null;
     const handlers = createToolHandlers({
@@ -197,6 +245,46 @@ describe("WebMCP adapter", () => {
     expect(prepared.data.manualFallback).toBe(true);
     expect(prepared.data.mockToolName).toBeNull();
     expect(prepared.data.evaluation.kind).toBe("test-run");
+  });
+
+  it("binds mock registration to the prepared evaluation workspace", async () => {
+    const base = createWorkspaceService(new MemoryWorkspaceStore());
+    const first = await base.create({ name: "First", skillMd: EMPTY_SKILL });
+    const second = await base.create({ name: "Second", skillMd: EMPTY_SKILL });
+    if (!first.ok || !second.ok) throw new Error("workspace setup failed");
+    let current: string | null = first.value.workspace.id;
+    const registerMockForRun = vi.fn(async () => "mock_read_items_test");
+    const handlers = createToolHandlers({
+      service: {
+        ...base,
+        prepareEvaluation: async (...args) => {
+          const result = await base.prepareEvaluation(...args);
+          current = second.value.workspace.id;
+          return result;
+        },
+      },
+      appearance: appearance(),
+      selection: { get: () => current, set: (id) => { current = id; } },
+      registerMockForRun,
+    });
+
+    await execute(
+      handlers.find((item) => item.name === "evaluation_prepare")!,
+      {
+        kind: "test-run",
+        contract: {
+          name: "read_items",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object" },
+        },
+      },
+    );
+
+    expect(registerMockForRun).toHaveBeenCalledWith(
+      first.value.workspace.id,
+      expect.any(String),
+      "read_items",
+    );
   });
 
   it("rejects malformed declared inputs as invalid submissions", async () => {

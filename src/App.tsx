@@ -5,6 +5,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import JSZip from "jszip";
 import {
   createBrowserAppearanceController,
   type AppearanceState,
@@ -90,6 +91,21 @@ const RESPONSE_SCHEMA = {
   properties: { themes: { type: "array", items: { type: "string" } } },
   required: ["themes"],
 } as const;
+
+async function skillEntriesFromZip(
+  file: File,
+): Promise<readonly { path: string; content: string }[]> {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  return Promise.all(
+    Object.values(zip.files)
+      .filter((entry) => !entry.dir)
+      .map(async (entry) => ({
+        path: entry.name,
+        content: await entry.async("string"),
+      })),
+  );
+}
+
 export function App({
   workspaceService = service,
 }: {
@@ -132,6 +148,7 @@ export function App({
   const registrationRef = useRef<Awaited<
     ReturnType<typeof registerWebMcpTools>
   > | null>(null);
+  const loadedEvaluationsRef = useRef<readonly EvaluationRecord[]>([]);
 
   useEffect(() => appearance.subscribe(setAppearanceState), []);
   useEffect(() => {
@@ -179,6 +196,7 @@ export function App({
           return;
         }
         registrationRef.current = registration;
+        registration.reconcileMockRegistrations(loadedEvaluationsRef.current);
         setWebMcp(registration.available ? "available" : "fallback");
       })
       .catch((error) => {
@@ -194,6 +212,8 @@ export function App({
   }, []);
 
   function loadBundle(next: WorkspaceBundle) {
+    loadedEvaluationsRef.current = next.evaluations;
+    registrationRef.current?.reconcileMockRegistrations(next.evaluations);
     sessionStorage.setItem("skill-canvas:open-workspace", next.workspace.id);
     setBundle(next);
     setWorkspaces((current) => [
@@ -249,8 +269,35 @@ export function App({
     if (result.ok) loadBundle(result.value);
     else setStatus(result.error.message);
   }
-  async function createFromFile(file: File) {
-    await create(await file.text());
+  async function createFromFiles(files: readonly File[]) {
+    const entries =
+      files.length === 1 && files[0]!.name.toLowerCase().endsWith(".zip")
+        ? await skillEntriesFromZip(files[0]!)
+        : await Promise.all(
+            files.map(async (file) => ({
+              path: file.webkitRelativePath || file.name,
+              content: await file.text(),
+            })),
+          );
+    const skillFiles = entries.filter(
+      (entry) => entry.path.split("/").at(-1)?.toLowerCase() === "skill.md",
+    );
+    if (skillFiles.length !== 1) {
+      setStatus("Import exactly one SKILL.md with its reference files.");
+      return;
+    }
+    const skill = skillFiles[0]!;
+    const root = skill.path.slice(0, -"SKILL.md".length);
+    const references = entries
+      .filter((entry) => entry !== skill && entry.path.startsWith(root))
+      .map((entry) => ({ path: entry.path.slice(root.length), content: entry.content }));
+    const result = await workspaceService.create({
+      skillMd: skill.content,
+      referenceFiles: references,
+      actor: "human",
+    });
+    if (result.ok) loadBundle(result.value);
+    else setStatus(result.error.message);
   }
   async function save() {
     if (!bundle) return;
@@ -345,6 +392,7 @@ export function App({
     if (registrationRef.current?.available) {
       try {
         const toolName = await registrationRef.current.registerMock(
+          bundle.workspace.id,
           result.value.id,
           SAMPLE_CONTRACT.name,
         );
@@ -492,7 +540,7 @@ export function App({
 
   const safeCreate = guarded(create);
   const safeOpenWorkspace = guarded(openWorkspace);
-  const safeCreateFromFile = guarded(createFromFile);
+  const safeCreateFromFiles = guarded(createFromFiles);
   const safeSave = guarded(save);
   const safeAnalyze = guarded(analyze);
   const safeCompareRevisions = guarded(compareRevisions);
@@ -571,7 +619,7 @@ export function App({
                 `---\nname: untitled-skill\ndescription: Use when the user needs this Skill's workflow.\n---\n\n# Untitled skill\n\nDescribe the workflow here.\n`,
               )
             }
-            onFile={safeCreateFromFile}
+            onFiles={safeCreateFromFiles}
             onSnapshotFile={safeImportWorkbenchSnapshot}
           />
         ) : (
@@ -740,14 +788,14 @@ function Welcome({
   onOpen,
   onCreate,
   onEmpty,
-  onFile,
+  onFiles,
   onSnapshotFile,
 }: {
   workspaces: readonly WorkspaceRecord[];
   onOpen(workspaceId: string): void;
   onCreate(): void;
   onEmpty(): void;
-  onFile(file: File): void;
+  onFiles(files: readonly File[]): void;
   onSnapshotFile(file: File): void;
 }) {
   return (
@@ -773,10 +821,11 @@ function Welcome({
             Import SKILL.md
             <input
               type="file"
-              accept=".md,text/markdown"
+              accept=".md,.zip,text/markdown,application/zip"
+              multiple
               onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) onFile(file);
+                const files = [...(event.target.files ?? [])];
+                if (files.length > 0) onFiles(files);
               }}
             />
           </label>

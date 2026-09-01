@@ -6,7 +6,7 @@ import {
   type ToolEnvelope,
 } from "./shared";
 import { validateSchema, type ToolContract } from "./evaluations";
-import type { WorkspaceBundle } from "./workspace/types";
+import type { EvaluationRecord, WorkspaceBundle } from "./workspace/types";
 import type { WorkspaceService } from "./workspace/service";
 
 export type WebMcpTool = {
@@ -46,6 +46,7 @@ type Runtime = {
     type: string,
   ) => void;
   registerMockForRun?: (
+    workspaceId: string,
     evaluationId: string,
     contractName: string,
   ) => Promise<string>;
@@ -294,6 +295,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
         ) {
           try {
             const mockToolName = await runtime.registerMockForRun(
+              bundle.value.workspace.id,
               result.value.id,
               (result.value.data as any).contract.name,
             );
@@ -491,12 +493,18 @@ export async function registerWebMcpTools(
   available: boolean;
   tools: readonly WebMcpTool[];
   dispose(): void;
-  registerMock(evaluationId: string, contractName: string): Promise<string>;
+  registerMock(
+    workspaceId: string,
+    evaluationId: string,
+    contractName: string,
+  ): Promise<string>;
+  reconcileMockRegistrations(evaluations: readonly EvaluationRecord[]): void;
   unregisterMockForRun(evaluationId: string): void;
 }> {
   const controller = new AbortController();
   const mockControllers = new Map<string, AbortController>();
   const registerMock = async (
+    workspaceId: string,
     evaluationId: string,
     contractName: string,
   ): Promise<string> => {
@@ -504,8 +512,6 @@ export async function registerWebMcpTools(
       runtime.onMockRegistrationChange?.(evaluationId, "unavailable");
       throw new Error("WebMCP is unavailable.");
     }
-    const workspaceId = runtime.selection.get();
-    if (!workspaceId) throw new Error("Open a workspace first.");
     const name = `mock_${contractName.replace(/[^A-Za-z0-9_.-]/g, "_")}_${evaluationId.replace(/[^A-Za-z0-9]/g, "").slice(-12)}`;
     const registration = new AbortController();
     mockControllers.set(evaluationId, registration);
@@ -570,6 +576,13 @@ export async function registerWebMcpTools(
     mockControllers.delete(evaluationId);
     runtime.onMockRegistrationChange?.(evaluationId, "completed");
   };
+  const reconcileMockRegistrations = (
+    evaluations: readonly EvaluationRecord[],
+  ) => {
+    for (const evaluation of evaluations)
+      if (evaluation.status === "complete" && mockControllers.has(evaluation.id))
+        unregisterMock(evaluation.id);
+  };
   const tools = createToolHandlers({
     ...runtime,
     registerMockForRun: registerMock,
@@ -581,6 +594,7 @@ export async function registerWebMcpTools(
       tools,
       dispose: () => controller.abort(),
       registerMock,
+      reconcileMockRegistrations,
       unregisterMockForRun: unregisterMock,
     };
   try {
@@ -601,6 +615,7 @@ export async function registerWebMcpTools(
       mockControllers.forEach((item) => item.abort());
     },
     registerMock,
+    reconcileMockRegistrations,
     unregisterMockForRun: unregisterMock,
   };
 }
