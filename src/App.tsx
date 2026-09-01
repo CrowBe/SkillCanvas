@@ -521,14 +521,6 @@ export function App({
       );
     } else setStatus(result.error.message);
   }
-  async function exportSkill() {
-    if (!bundle) return;
-    const result = await workspaceService.exportSkill(bundle.workspace.id);
-    if (result.ok) {
-      download(`${bundle.workspace.name}.zip`, result.value, "application/zip");
-      setStatus("Standard-native Skill exported without workbench metadata.");
-    } else setStatus(result.error.message);
-  }
   async function exportSnapshot() {
     if (!bundle) return;
     const result = await workspaceService.exportSnapshot(bundle.workspace.id);
@@ -539,7 +531,7 @@ export function App({
         "application/json",
       );
       setStatus(
-        "Workbench snapshot exported. Evaluation and comparison evidence is retained in the file but must be regenerated locally before import.",
+        "Evidence-free workbench snapshot exported. Evaluations and comparisons must be regenerated locally after import.",
       );
     } else setStatus(result.error.message);
   }
@@ -562,7 +554,7 @@ export function App({
         return;
       }
       const confirmed = window.confirm(
-          `Replace saved workspace “${existingName}” with incoming snapshot “${inspection.value.incomingWorkspace.name}”? This will permanently replace the saved workspace's local revisions and locally importable artifacts.`,
+        `Replace saved workspace “${existingName}” with incoming snapshot “${inspection.value.incomingWorkspace.name}”? This will permanently replace the saved workspace's local revisions and locally importable artifacts.`,
       );
       if (!confirmed) {
         setStatus(
@@ -614,7 +606,6 @@ export function App({
   const safeInvokeManualMock = guarded(invokeManualMock);
   const safeSubmitFinal = guarded(submitFinal);
   const safeSubmitMap = guarded(submitMap);
-  const safeExportSkill = guarded(exportSkill);
   const safeExportSnapshot = guarded(exportSnapshot);
   const safeImportWorkbenchSnapshot = guarded(importWorkbenchSnapshot);
 
@@ -735,9 +726,6 @@ export function App({
                   Analyze
                 </button>
                 <button onClick={safeCompareRevisions}>Compare</button>
-                <button onClick={safeExportSkill} data-testid="export-skill">
-                  Export Skill
-                </button>
                 <button
                   className="primary"
                   onClick={safeSave}
@@ -959,31 +947,27 @@ function RenderedSkill({
   raw: string;
 }) {
   if (!source) return <pre className="invalid-source">{raw}</pre>;
-  const blocks = source.body.split(/\n{2,}/).filter(Boolean);
+  const lines = source.body.split("\n");
   return (
     <article className="rendered-skill">
       <header>
         <h1>{source.frontmatter.name}</h1>
         <p>{source.frontmatter.description}</p>
       </header>
-      {blocks.map((block: string, index: number) => {
-        const heading = block.match(/^(#{1,6})\s+(.+)/);
-        if (heading)
-          return heading[1] === "#" && index === 0 ? null : (
-            <h2 key={index}>{heading[2]}</h2>
-          );
-        if (/^(?:[-*]|\d+\.)\s/m.test(block))
+      {lines.map((line: string, index: number) => {
+        const heading = line.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) return <h2 key={index}>{heading[2]}</h2>;
+        if (/^(?:[-*]|\d+\.)\s/.test(line))
           return (
             <ul key={index}>
-              {block
-                .split("\n")
-                .filter((line) => line.trim().length > 0)
-                .map((line) => (
-                  <li key={line}>{line.replace(/^(?:[-*]|\d+\.)\s+/, "")}</li>
-                ))}
+              <li>{line.replace(/^(?:[-*]|\d+\.)\s+/, "")}</li>
             </ul>
           );
-        return <p key={index}>{block}</p>;
+        return line.length === 0 ? (
+          <br key={index} />
+        ) : (
+          <p key={index}>{line}</p>
+        );
       })}
     </article>
   );

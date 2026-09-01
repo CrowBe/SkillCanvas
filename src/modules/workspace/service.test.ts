@@ -1,4 +1,3 @@
-import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { SNAPSHOT_MAX_BYTES, byteLength, sha256 } from "../shared";
 import { EMPTY_SKILL } from "../skill";
@@ -67,7 +66,7 @@ describe("WorkspaceService", () => {
     expect(prior.ok && prior.value.skillMd).toBe(created.value.skillMd);
   });
 
-  it("deduplicates byte-identical blobs and exports a metadata-free Skill zip", async () => {
+  it("deduplicates byte-identical blobs in portable snapshots", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({
       skillMd: EMPTY_SKILL,
@@ -82,19 +81,6 @@ describe("WorkspaceService", () => {
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
     expect(JSON.parse(snapshot.value).blobs).toHaveLength(2);
-    const exported = await service.exportSkill(created.value.workspace.id);
-    expect(exported.ok).toBe(true);
-    if (!exported.ok) return;
-    const zip = await JSZip.loadAsync(exported.value);
-    expect(Object.keys(zip.files).sort()).toEqual([
-      "SKILL.md",
-      "references/",
-      "references/guide.md",
-      "references/other.md",
-    ]);
-    expect(
-      Object.keys(zip.files).some((name) => name.includes("workbench")),
-    ).toBe(false);
   });
 
   it("preserves line endings as part of blob identity", async () => {
@@ -152,7 +138,7 @@ describe("WorkspaceService", () => {
     if (!malformed.ok) expect(malformed.error.code).toBe("invalid_snapshot");
   });
 
-  it("rejects noncanonical workspace, evaluation, and audit ids", async () => {
+  it("rejects noncanonical workspace and audit ids", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
@@ -177,24 +163,6 @@ describe("WorkspaceService", () => {
       expect(imported.ok).toBe(false);
       if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
     }
-
-    const prepared = await source.prepareEvaluation(
-      created.value.workspace.id,
-      "triggering",
-    );
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const withEvaluation = await source.exportSnapshot(
-      created.value.workspace.id,
-    );
-    if (!withEvaluation.ok) throw new Error(withEvaluation.error.message);
-    const snapshot = JSON.parse(withEvaluation.value);
-    snapshot.evaluations[0].id = "x";
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-    if (!imported.ok)
-      expect(imported.error.message).toContain("evaluation record");
   });
 
   it("restores an earlier snapshot over the same workspace", async () => {
@@ -619,257 +587,6 @@ describe("WorkspaceService schema and submission guards", () => {
 });
 
 describe("snapshot import schema guards", () => {
-  it("appends a distinct immutable evidence state for every comparison", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await service.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const updated = await service.update({
-      workspaceId: id,
-      baseRevision: 1,
-      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
-      actor: "human",
-    });
-    if (!updated.ok) throw new Error(updated.error.message);
-    expect((await service.compare(id, 1, 2)).ok).toBe(true);
-    expect((await service.compare(id, 1, 2)).ok).toBe(true);
-
-    const exported = await service.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const artifacts = JSON.parse(exported.value).artifacts;
-    expect(
-      artifacts.filter((item: any) => item.kind === "compare"),
-    ).toHaveLength(2);
-    expect(
-      artifacts.filter(
-        (item: any) => item.kind === "comparison-evaluation-state",
-      ),
-    ).toHaveLength(2);
-    const comparisons = artifacts.filter(
-      (item: any) => item.kind === "compare",
-    );
-    for (const comparison of comparisons) {
-      const state = artifacts.find(
-        (item: any) => item.id === comparison.data.evaluationStateId,
-      );
-      expect(comparison.id.split(":").at(-1)).toBe(state.id.split(":").at(-1));
-      expect(comparison.id).toMatch(
-        /:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-      );
-    }
-  });
-
-  it("rejects mismatched comparison instance identifiers", async () => {
-    const source = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await source.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const updated = await source.update({
-      workspaceId: created.value.workspace.id,
-      baseRevision: 1,
-      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
-      actor: "human",
-    });
-    if (!updated.ok) throw new Error(updated.error.message);
-    const compared = await source.compare(created.value.workspace.id, 1, 2);
-    if (!compared.ok) throw new Error(compared.error.message);
-    const exported = await source.exportSnapshot(created.value.workspace.id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const state = snapshot.artifacts.find(
-      (item: any) => item.kind === "comparison-evaluation-state",
-    );
-    const replacement = crypto.randomUUID();
-    state.id = state.id.replace(/[^:]+$/, replacement);
-    snapshot.artifacts.find(
-      (item: any) => item.kind === "compare",
-    ).data.evaluationStateId = state.id;
-
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-  });
-
-  it("excludes future evaluation transitions from new comparisons", async () => {
-    const source = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await source.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const updated = await source.update({
-      workspaceId: id,
-      baseRevision: 1,
-      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
-      actor: "human",
-    });
-    if (!updated.ok) throw new Error(updated.error.message);
-    const prepared = await source.prepareEvaluation(id, "triggering");
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const exported = await source.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const future = "2099-01-01T00:00:00.000Z";
-    snapshot.evaluations[0].createdAt = future;
-    snapshot.evaluations[0].updatedAt = future;
-    const transition = snapshot.artifacts.find(
-      (item: any) => item.kind === "evaluation-transition",
-    );
-    transition.createdAt = future;
-    transition.data.state.createdAt = future;
-    transition.data.state.updatedAt = future;
-    transition.data.stateHash = await sha256(
-      JSON.stringify(transition.data.state),
-    );
-    const localStore = new MemoryWorkspaceStore();
-    localStore.loadValidatedSnapshot(snapshot);
-    const importer = createWorkspaceService(localStore);
-
-    const compared = await importer.compare(id, 1, 2);
-    expect(compared.ok).toBe(true);
-    if (compared.ok) expect(compared.value.evaluationReferences).toEqual([]);
-    const roundTrip = await importer.exportSnapshot(id);
-    if (!roundTrip.ok) throw new Error(roundTrip.error.message);
-    const rejected = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(roundTrip.value);
-    expect(rejected.ok).toBe(false);
-    if (!rejected.ok)
-      expect(rejected.error.message).toContain("regenerate evaluations");
-  });
-
-  it("rejects comparisons after later evaluation lifecycle changes", async () => {
-    const source = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await source.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const updated = await source.update({
-      workspaceId: id,
-      baseRevision: 1,
-      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
-      actor: "human",
-    });
-    if (!updated.ok) throw new Error(updated.error.message);
-    const prepared = await source.prepareEvaluation(id, "triggering");
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const compared = await source.compare(id, 1, 2);
-    if (!compared.ok) throw new Error(compared.error.message);
-    const firstCase = (prepared.value.data as any).cases[0];
-    const submitted = await source.submitEvaluation(id, prepared.value.id, {
-      caseId: firstCase.id,
-      selectedChoiceId: firstCase.choices[0].id,
-      rationale: "Lifecycle advanced after comparison.",
-    });
-    if (!submitted.ok) throw new Error(submitted.error.message);
-    const later = await source.prepareEvaluation(id, "triggering");
-    if (!later.ok) throw new Error(later.error.message);
-    const exported = await source.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(exported.value);
-
-    expect(imported.ok).toBe(false);
-    if (!imported.ok)
-      expect(imported.error.message).toContain("regenerate evaluations");
-  });
-
-  it("rejects self-authored empty comparison evaluation evidence", async () => {
-    const source = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await source.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const updated = await source.update({
-      workspaceId: id,
-      baseRevision: 1,
-      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
-      actor: "human",
-    });
-    if (!updated.ok) throw new Error(updated.error.message);
-    const prepared = await source.prepareEvaluation(id, "triggering");
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const compared = await source.compare(id, 1, 2);
-    if (!compared.ok) throw new Error(compared.error.message);
-    const exported = await source.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const comparison = snapshot.artifacts.find(
-      (item: any) => item.kind === "compare",
-    );
-    const evaluationState = snapshot.artifacts.find(
-      (item: any) => item.kind === "comparison-evaluation-state",
-    );
-    comparison.data.evaluationReferences = [];
-    comparison.data.evaluationSnapshotHash = await sha256(JSON.stringify([]));
-    evaluationState.data.evaluations = [];
-
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-
-  it("rejects a comparison rewritten to an earlier evidence prefix", async () => {
-    const source = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await source.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const updated = await source.update({
-      workspaceId: id,
-      baseRevision: 1,
-      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
-      actor: "human",
-    });
-    if (!updated.ok) throw new Error(updated.error.message);
-    const prepared = await source.prepareEvaluation(id, "triggering");
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const firstCase = (prepared.value.data as any).cases[0];
-    const submitted = await source.submitEvaluation(id, prepared.value.id, {
-      caseId: firstCase.id,
-      selectedChoiceId: firstCase.choices[0].id,
-      rationale: "Capture a real transition.",
-    });
-    if (!submitted.ok) throw new Error(submitted.error.message);
-    const compared = await source.compare(id, 1, 2);
-    if (!compared.ok) throw new Error(compared.error.message);
-    const exported = await source.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const comparison = snapshot.artifacts.find(
-      (item: any) => item.kind === "compare",
-    );
-    const state = snapshot.artifacts.find(
-      (item: any) => item.id === comparison.data.evaluationStateId,
-    );
-    const preparedTransition = snapshot.artifacts.find(
-      (item: any) =>
-        item.kind === "evaluation-transition" && item.data.sequence === 0,
-    );
-    const altered = structuredClone(snapshot.evaluations[0]);
-    altered.data.observations[0].rationale = "Importer-authored rationale.";
-    snapshot.evaluations[0] = altered;
-    state.data.evaluations = [altered];
-    state.data.transitionIds = [preparedTransition.id];
-    comparison.data.evaluationReferences = state.data.evaluations.map(
-      ({ id, kind, revision, status, updatedAt }: any) => ({
-        id,
-        kind,
-        revision,
-        status,
-        updatedAt,
-      }),
-    );
-    comparison.data.evaluationSnapshotHash = await sha256(
-      JSON.stringify(state.data.evaluations),
-    );
-
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-  });
-
   it("recomputes deterministic artifacts during snapshot admission", async () => {
     const source = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await source.create({ skillMd: EMPTY_SKILL });
@@ -886,8 +603,6 @@ describe("snapshot import schema guards", () => {
     if (!updated.ok) throw new Error(updated.error.message);
     const secondAnalysis = await source.analyze(id, ["lint", "structure"]);
     if (!secondAnalysis.ok) throw new Error(secondAnalysis.error.message);
-    const compared = await source.compare(id, 1, 2);
-    if (!compared.ok) throw new Error(compared.error.message);
     const exported = await source.exportSnapshot(id);
     if (!exported.ok) throw new Error(exported.error.message);
 
@@ -902,11 +617,6 @@ describe("snapshot import schema guards", () => {
           (item: any) => item.kind === "structure",
         ).data.title = "Falsified";
       },
-      (snapshot: any) => {
-        snapshot.artifacts.find(
-          (item: any) => item.kind === "compare",
-        ).data.source.additions += 1;
-      },
     ]) {
       const snapshot = JSON.parse(exported.value);
       mutate(snapshot);
@@ -917,465 +627,72 @@ describe("snapshot import schema guards", () => {
       if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
     }
   });
-
-  it("rejects an imported test-run evaluation whose contract schema is malformed", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await service.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const prepared = await service.prepareEvaluation(id, "test-run", {
-      contract: {
-        name: "read_items",
-        description: "Read items",
-        inputSchema: { type: "object" },
-        outputSchema: { type: "object" },
-        mockOutput: {},
-      },
-    });
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const exported = await service.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const testRun = snapshot.evaluations.find(
-      (item: any) => item.kind === "test-run",
-    );
-    testRun.data.contract.inputSchema = null;
-    const importer = createWorkspaceService(new MemoryWorkspaceStore());
-    const imported = await importer.importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
 });
 
-describe("snapshot import evaluation data guards", () => {
-  async function snapshotWith(
-    mutate: (snapshot: any) => void,
-  ): Promise<string> {
+describe("portable snapshot evidence boundary", () => {
+  it("keeps only the latest canonical comparison", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     const created = await service.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
     const id = created.value.workspace.id;
-    const triggering = await service.prepareEvaluation(id, "triggering");
-    if (!triggering.ok) throw new Error(triggering.error.message);
-    const testRun = await service.prepareEvaluation(id, "test-run", {
-      contract: {
-        name: "read_items",
-        description: "Read items",
-        inputSchema: { type: "object" },
-        outputSchema: { type: "object" },
-        mockOutput: {},
-      },
-    });
-    if (!testRun.ok) throw new Error(testRun.error.message);
-    const analyzed = await service.analyze(id, ["lint"]);
-    if (!analyzed.ok) throw new Error(analyzed.error.message);
-    const exported = await service.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    mutate(snapshot);
-    return JSON.stringify(snapshot);
-  }
 
-  it("rejects well-formed imported evaluation evidence", async () => {
-    const json = await snapshotWith(() => {});
-    const importer = createWorkspaceService(new MemoryWorkspaceStore());
-    const imported = await importer.importSnapshot(json);
-    expect(imported.ok).toBe(false);
-    if (!imported.ok)
-      expect(imported.error.message).toContain("regenerate evaluations");
-  });
-
-  it("rejects a test-run evaluation whose transcript is missing", async () => {
-    const json = await snapshotWith((snapshot) => {
-      const testRun = snapshot.evaluations.find(
-        (item: any) => item.kind === "test-run",
-      );
-      delete testRun.data.transcript;
-    });
-    const importer = createWorkspaceService(new MemoryWorkspaceStore());
-    const imported = await importer.importSnapshot(json);
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-
-  it("rejects a test-run evaluation whose seed data is missing", async () => {
-    const json = await snapshotWith((snapshot) => {
-      const testRun = snapshot.evaluations.find(
-        (item: any) => item.kind === "test-run",
-      );
-      delete testRun.data.scenario.seedData;
-    });
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(json);
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-
-  it("rejects altered deterministic evaluation fixtures", async () => {
-    for (const mutate of [
-      (snapshot: any) => {
-        snapshot.evaluations.find(
-          (item: any) => item.kind === "triggering",
-        ).data.cases[0].prompt = "Tampered prompt";
-      },
-      (snapshot: any) => {
-        snapshot.evaluations.find(
-          (item: any) => item.kind === "test-run",
-        ).data.scenario.seedData = { falsified: true };
-      },
-      (snapshot: any) => {
-        const testRun = snapshot.evaluations.find(
-          (item: any) => item.kind === "test-run",
-        );
-        testRun.data.contract.mockOutput = { falsified: true };
-        testRun.data.scenario.seedData = { falsified: true };
-      },
-    ]) {
-      const imported = await createWorkspaceService(
-        new MemoryWorkspaceStore(),
-      ).importSnapshot(await snapshotWith(mutate));
-      expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-    }
-  });
-
-  it("rejects snapshots beyond the iterative nesting bound", async () => {
-    const snapshot = JSON.parse(await snapshotWith(() => {}));
-    snapshot.auditEvents[0].details = { nested: "__nested_value__" };
-    const nested = `${'{"child":'.repeat(70)}null${"}".repeat(70)}`;
-    const withNestedAuditDetails = JSON.stringify(snapshot).replace(
-      '"__nested_value__"',
-      nested,
+    await service.compare(id, 1, 1);
+    await service.compare(id, 1, 1);
+    const opened = await service.open(id);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const comparisons = opened.value.artifacts.filter(
+      (artifact) => artifact.kind === "compare",
     );
 
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(withNestedAuditDetails);
-
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+    expect(comparisons).toHaveLength(1);
+    expect(comparisons[0]!.id).toMatch(
+      /:compare:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
   });
 
-  it("recomputes deterministic test-run checks during import", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
+  it("exports importable JSON without deterministic evidence", async () => {
+    const store = new MemoryWorkspaceStore();
+    const service = createWorkspaceService(store);
     const created = await service.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
     const id = created.value.workspace.id;
-    const prepared = await service.prepareEvaluation(id, "test-run", {
-      contract: {
-        name: "read_items",
-        description: "Read items",
-        inputSchema: { type: "object" },
-        outputSchema: { type: "object" },
-        mockOutput: {},
-      },
-    });
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const invoked = await service.invokeMock(id, prepared.value.id, {});
-    if (!invoked.ok) throw new Error(invoked.error.message);
-    const completed = await service.submitEvaluation(id, prepared.value.id, {
-      finalOutput: {},
-    });
-    if (!completed.ok) throw new Error(completed.error.message);
+    await service.prepareEvaluation(id, "triggering");
+    await service.compare(id, 1, 1);
+
     const exported = await service.exportSnapshot(id);
     if (!exported.ok) throw new Error(exported.error.message);
     const snapshot = JSON.parse(exported.value);
-    const testRun = snapshot.evaluations.find(
-      (item: any) => item.kind === "test-run",
-    );
-    testRun.data.checks[0].passed = !testRun.data.checks[0].passed;
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-
-  it("rejects completed agent evidence even with canonical fixtures", async () => {
-    const source = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await source.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const prepared = await source.prepareEvaluation(id, "test-run", {
-      contract: {
-        name: "read_items",
-        description: "Read items",
-        inputSchema: { type: "object" },
-        outputSchema: { type: "object" },
-        mockOutput: { items: [] },
-      },
-    });
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const invoked = await source.invokeMock(id, prepared.value.id, {
-      requestedBy: "agent",
-    });
-    if (!invoked.ok) throw new Error(invoked.error.message);
-    const completed = await source.submitEvaluation(id, prepared.value.id, {
-      finalOutput: { summary: "agent supplied" },
-    });
-    if (!completed.ok) throw new Error(completed.error.message);
-    const exported = await source.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-
+    expect(snapshot.evaluations).toEqual([]);
+    expect(
+      snapshot.artifacts.some((item: any) => item.kind === "compare"),
+    ).toBe(false);
     const imported = await createWorkspaceService(
       new MemoryWorkspaceStore(),
     ).importSnapshot(exported.value);
-
-    expect(imported.ok).toBe(false);
-    if (!imported.ok)
-      expect(imported.error.message).toContain("regenerate evaluations");
+    expect(imported.ok).toBe(true);
   });
 
-  it("rejects noncanonical UTC timestamps", async () => {
-    for (const mutate of [
-      (snapshot: any) => {
-        snapshot.exportedAt = "2026-01-01T10:00:00+10:00";
-      },
-      (snapshot: any) => {
-        snapshot.evaluations[0].updatedAt = "2026-01-01T10:00:00+10:00";
-      },
-    ]) {
+  it("rejects locally captured evaluation and comparison evidence", async () => {
+    for (const kind of ["evaluation", "comparison"] as const) {
+      const store = new MemoryWorkspaceStore();
+      const service = createWorkspaceService(store);
+      const created = await service.create({ skillMd: EMPTY_SKILL });
+      if (!created.ok) throw new Error(created.error.message);
+      const id = created.value.workspace.id;
+      if (kind === "evaluation")
+        await service.prepareEvaluation(id, "triggering");
+      else await service.compare(id, 1, 1);
+      const snapshot = await store.exportSnapshot(id);
+      if ("code" in snapshot) throw new Error(snapshot.message);
+
       const imported = await createWorkspaceService(
         new MemoryWorkspaceStore(),
-      ).importSnapshot(await snapshotWith(mutate));
+      ).importSnapshot(JSON.stringify(snapshot));
       expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
+      if (!imported.ok) {
+        expect(imported.error.code).toBe("invalid_snapshot");
+        expect(imported.error.message).toContain("regenerate evaluations");
+      }
     }
-  });
-
-  it("rejects noncanonical reference paths instead of persisting them", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await service.create({
-      skillMd: EMPTY_SKILL,
-      referenceFiles: [{ path: "guide.md", content: "guide" }],
-    });
-    if (!created.ok) throw new Error(created.error.message);
-    const exported = await service.exportSnapshot(created.value.workspace.id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    snapshot.revisions[0].references[0].path = "./guide.md";
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-
-  it("rejects a triggering evaluation whose observations are missing", async () => {
-    const json = await snapshotWith((snapshot) => {
-      const triggering = snapshot.evaluations.find(
-        (item: any) => item.kind === "triggering",
-      );
-      delete triggering.data.observations;
-    });
-    const importer = createWorkspaceService(new MemoryWorkspaceStore());
-    const imported = await importer.importSnapshot(json);
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-
-  it("rejects incomplete triggering observations and transcript steps", async () => {
-    for (const mutate of [
-      (snapshot: any) => {
-        const triggering = snapshot.evaluations.find(
-          (item: any) => item.kind === "triggering",
-        );
-        triggering.data.observations.push({
-          caseId: triggering.data.cases[0].id,
-        });
-      },
-      (snapshot: any) => {
-        const testRun = snapshot.evaluations.find(
-          (item: any) => item.kind === "test-run",
-        );
-        testRun.data.transcript.push({ kind: "tool-call" });
-      },
-    ]) {
-      const json = await snapshotWith(mutate);
-      const imported = await createWorkspaceService(
-        new MemoryWorkspaceStore(),
-      ).importSnapshot(json);
-      expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-    }
-  });
-
-  it("rejects malformed artifact and audit records before store import", async () => {
-    for (const mutate of [
-      (snapshot: any) => snapshot.artifacts.push(null),
-      (snapshot: any) => snapshot.auditEvents.push(null),
-    ]) {
-      const json = await snapshotWith(mutate);
-      const imported = await createWorkspaceService(
-        new MemoryWorkspaceStore(),
-      ).importSnapshot(json);
-      expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-    }
-  });
-
-  it("rejects malformed workspace, revision, and artifact payloads", async () => {
-    for (const mutate of [
-      (snapshot: any) => {
-        snapshot.workspace.updatedAt = 0;
-      },
-      (snapshot: any) => {
-        snapshot.revisions[0].timestamp = null;
-      },
-      (snapshot: any) => {
-        snapshot.artifacts[0].data = {};
-      },
-    ]) {
-      const json = await snapshotWith(mutate);
-      const imported = await createWorkspaceService(
-        new MemoryWorkspaceStore(),
-      ).importSnapshot(json);
-      expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-    }
-  });
-
-  it("rejects evaluation statuses inconsistent with their evidence", async () => {
-    for (const mutate of [
-      (snapshot: any) => {
-        const triggering = snapshot.evaluations.find(
-          (item: any) => item.kind === "triggering",
-        );
-        triggering.status = "complete";
-      },
-      (snapshot: any) => {
-        const testRun = snapshot.evaluations.find(
-          (item: any) => item.kind === "test-run",
-        );
-        testRun.status = "complete";
-      },
-    ]) {
-      const json = await snapshotWith(mutate);
-      const imported = await createWorkspaceService(
-        new MemoryWorkspaceStore(),
-      ).importSnapshot(json);
-      expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-    }
-  });
-
-  it("rejects evidence records linked to unrelated revisions", async () => {
-    for (const mutate of [
-      (snapshot: any) => {
-        snapshot.evaluations[0].contentHash = "unrelated";
-      },
-      (snapshot: any) => {
-        snapshot.artifacts[0].revision = 999;
-      },
-      (snapshot: any) => {
-        snapshot.auditEvents[0].revision = 999;
-      },
-    ]) {
-      const json = await snapshotWith(mutate);
-      const imported = await createWorkspaceService(
-        new MemoryWorkspaceStore(),
-      ).importSnapshot(json);
-      expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-    }
-  });
-});
-
-describe("snapshot import triggering case guards", () => {
-  it("rejects a triggering case whose expected value is missing or unknown", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await service.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const id = created.value.workspace.id;
-    const prepared = await service.prepareEvaluation(id, "triggering");
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const exported = await service.exportSnapshot(id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    for (const mutate of [
-      (item: any) => delete item.expected,
-      (item: any) => {
-        item.expected = "maybe";
-      },
-    ]) {
-      const snapshot = JSON.parse(exported.value);
-      const triggering = snapshot.evaluations.find(
-        (item: any) => item.kind === "triggering",
-      );
-      mutate(triggering.data.cases[0]);
-      const importer = createWorkspaceService(new MemoryWorkspaceStore());
-      const imported = await importer.importSnapshot(JSON.stringify(snapshot));
-      expect(imported.ok).toBe(false);
-      if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-    }
-  });
-
-  it("rejects a noncanonical triggering candidate identity", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await service.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const prepared = await service.prepareEvaluation(
-      created.value.workspace.id,
-      "triggering",
-    );
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const exported = await service.exportSnapshot(created.value.workspace.id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const triggering = snapshot.evaluations.find(
-      (item: any) => item.kind === "triggering",
-    );
-    for (const testCase of triggering.data.cases)
-      testCase.choices.find((choice: any) => choice.candidate).id = "skill-1";
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-
-  it("rejects incomplete triggering choice records", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await service.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const prepared = await service.prepareEvaluation(
-      created.value.workspace.id,
-      "triggering",
-    );
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const exported = await service.exportSnapshot(created.value.workspace.id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    const triggering = snapshot.evaluations.find(
-      (item: any) => item.kind === "triggering",
-    );
-    delete triggering.data.cases[0].choices[0].candidate;
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
-  });
-});
-
-describe("snapshot import evaluation kinds", () => {
-  it("rejects deferred evaluation kinds before rendering", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
-    const created = await service.create({ skillMd: EMPTY_SKILL });
-    if (!created.ok) throw new Error(created.error.message);
-    const prepared = await service.prepareEvaluation(
-      created.value.workspace.id,
-      "triggering",
-    );
-    if (!prepared.ok) throw new Error(prepared.error.message);
-    const exported = await service.exportSnapshot(created.value.workspace.id);
-    if (!exported.ok) throw new Error(exported.error.message);
-    const snapshot = JSON.parse(exported.value);
-    snapshot.evaluations[0].kind = "capacity-probe";
-    const imported = await createWorkspaceService(
-      new MemoryWorkspaceStore(),
-    ).importSnapshot(JSON.stringify(snapshot));
-    expect(imported.ok).toBe(false);
-    if (!imported.ok) expect(imported.error.code).toBe("invalid_snapshot");
   });
 });

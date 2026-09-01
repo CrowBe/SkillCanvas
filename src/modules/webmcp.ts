@@ -375,30 +375,30 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       },
     },
     {
-      name: "skill_export",
-      title: "Export Skill",
+      name: "workspace_snapshot_export",
+      title: "Export Workspace Snapshot",
       description:
-        "Downloads a standard-native Skill zip containing only SKILL.md and reference files.",
+        "Downloads the evidence-free workspace as JSON; evaluations and comparisons must be regenerated locally after import.",
       execute: async () => {
         const bundle = await current();
         if (!bundle.ok) return bundleEnvelope(bundle);
-        const result = await runtime.service.exportSkill(
+        const result = await runtime.service.exportSnapshot(
           bundle.value.workspace.id,
         );
         if (result.ok)
           runtime.download?.(
-            `${bundle.value.workspace.name}.zip`,
+            `${bundle.value.workspace.name}.workbench.json`,
             result.value,
-            "application/zip",
+            "application/json",
           );
         return bundleEnvelope(
           result.ok
             ? {
                 ok: true,
                 value: {
-                  filename: `${bundle.value.workspace.name}.zip`,
-                  bytes: result.value.byteLength,
-                  includesWorkbenchMetadata: false,
+                  filename: `${bundle.value.workspace.name}.workbench.json`,
+                  bytes: new TextEncoder().encode(result.value).byteLength,
+                  includesDeterministicEvidence: false,
                 },
               }
             : result,
@@ -410,7 +410,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       name: "workspace_snapshot_import",
       title: "Import Workspace Snapshot",
       description:
-        "Imports a bounded workbench snapshot with revisions and evidence.",
+        "Imports a bounded evidence-free workbench snapshot; evaluation and comparison evidence is rejected and must be regenerated locally.",
       inputSchema: {
         type: "object",
         required: ["json"],
@@ -574,11 +574,18 @@ export async function registerWebMcpTools(
         { signal: registration.signal },
       );
     } catch (error) {
-      mockControllers.delete(evaluationId);
-      registration.abort();
-      runtime.onMockRegistrationChange?.(evaluationId, "unavailable");
+      if (mockControllers.get(evaluationId)?.controller === registration) {
+        mockControllers.delete(evaluationId);
+        registration.abort();
+        runtime.onMockRegistrationChange?.(evaluationId, "unavailable");
+      }
       throw error;
     }
+    if (
+      registration.signal.aborted ||
+      mockControllers.get(evaluationId)?.controller !== registration
+    )
+      throw new Error("Mock registration was superseded or evicted.");
     runtime.onMockRegistrationChange?.(evaluationId, "registered");
     return name;
   };

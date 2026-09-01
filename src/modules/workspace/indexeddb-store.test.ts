@@ -94,6 +94,23 @@ function databaseControl() {
 }
 
 describe("IndexedDbWorkspaceStore transactions", () => {
+  it("hydrates every object store through one readonly transaction", async () => {
+    const control = databaseControl();
+    const store = new IndexedDbWorkspaceStore(control.database);
+
+    await store.listWorkspaces();
+
+    expect(control.databaseGetAlls).toEqual([]);
+    expect(control.transactionGetAlls).toEqual([
+      "workspaces",
+      "revisions",
+      "blobs",
+      "artifacts",
+      "evaluations",
+      "auditEvents",
+    ]);
+  });
+
   it("does not expose a revision whose persistence failed", async () => {
     const control = databaseControl();
     const store = new IndexedDbWorkspaceStore(control.database);

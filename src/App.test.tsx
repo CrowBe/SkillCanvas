@@ -183,6 +183,22 @@ describe("App WebMCP registration lifecycle", () => {
     );
   });
 
+  it("renders content immediately following a heading", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await workspaceService.create({
+      skillMd: `${EMPTY_SKILL}\n## Constraint\nDo not delete files.`,
+    });
+    if (!created.ok) throw new Error(created.error.message);
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /untitled-skill Revision 1/ }),
+    );
+
+    expect(await screen.findByText("Constraint")).toBeInTheDocument();
+    expect(screen.getByText("Do not delete files.")).toBeInTheDocument();
+  });
+
   it("preflights selected file bounds before reading any bytes", async () => {
     const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
     const { App } = await import("./App");
@@ -396,8 +412,6 @@ describe("App WebMCP registration lifecycle", () => {
           after: { score, grade: "A", counts: { error: 0, warn: 0, info: 0 } },
         },
         evaluationReferences: [],
-        evaluationStateId: `${id}:state`,
-        evaluationSnapshotHash: "hash",
       },
     });
     const opened = await source.open(created.value.workspace.id);

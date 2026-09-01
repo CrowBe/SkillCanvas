@@ -255,6 +255,45 @@ describe("WebMCP adapter", () => {
     expect(statuses.at(-1)).toBe("unavailable");
   });
 
+  it("keeps an evicted pending mock unavailable after registration resolves", async () => {
+    let finishMockRegistration: (() => void) | undefined;
+    const statuses: string[] = [];
+    const context = {
+      registerTool: vi.fn(
+        async (tool: WebMcpTool, options?: { signal?: AbortSignal }) => {
+          if (!tool.name.startsWith("mock_")) return undefined;
+          await new Promise<void>((resolve) => {
+            finishMockRegistration = resolve;
+          });
+          expect(options?.signal?.aborted).toBe(true);
+          return undefined;
+        },
+      ),
+    };
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const registration = await registerWebMcpTools(context, {
+      service,
+      appearance: appearance(),
+      selection: { get: () => created.value.workspace.id, set: vi.fn() },
+      onMockRegistrationChange: (_evaluationId, status) =>
+        statuses.push(status),
+    });
+
+    const pending = registration.registerMock(
+      created.value.workspace.id,
+      "eval_pending",
+      "read_items",
+    );
+    await vi.waitFor(() => expect(finishMockRegistration).toBeDefined());
+    registration.reconcileMockRegistrations(null, []);
+    finishMockRegistration!();
+
+    await expect(pending).rejects.toThrow("superseded or evicted");
+    expect(statuses).toEqual(["unavailable"]);
+  });
+
   it("returns a prepared run with manual fallback when mock registration fails", async () => {
     let current: string | null = null;
     const handlers = createToolHandlers({

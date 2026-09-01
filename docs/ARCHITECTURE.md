@@ -4,7 +4,7 @@
 
 Skill Canvas is a static, deployable browser workbench built around a legibility problem: Skills are behaviorally important but operationally invisible. This is most acute for imported and default Skills, where a user may not know what instructions exist, when they apply, or whether they are well formed. The workbench provides several complementary views—rendered intent, structural anatomy, Source-spans, lint, instruction load, observed evaluations, and revision comparison—so a user can understand, judge, and improve a Skill without reducing it to one score.
 
-The visiting browser agent is the inference engine and Skill author. The site provides visible deterministic state, validation, mock worlds, evidence capture, grading, revision comparison, and standard-native export. Human UI remains complete without WebMCP.
+The visiting browser agent is the inference engine and Skill author. The site provides visible deterministic state, validation, mock worlds, evidence capture, grading, revision comparison, and evidence-free JSON export. Human UI remains complete without WebMCP.
 
 ## Module graph
 
@@ -122,13 +122,13 @@ Deterministic artifacts and agent-supplied judgments occupy separate fields/reco
 
 `AppearanceController` owns `readState()` and `setChoice(choice)`. React and WebMCP never write document attributes or storage directly. One registry includes system, light, dark, tuxedo, cardigan, and terminal plus semantic/look tokens. System mode follows later `prefers-color-scheme` changes; explicit modes do not. One event updates all subscribers.
 
-Appearance is a browser preference, not workspace content. It is excluded from revisioning, hashes, evaluation evidence, snapshots, and Skill export.
+Appearance is a browser preference, not workspace content. It is excluded from revisioning, hashes, evaluation evidence, and snapshots.
 
 ## Import, export, and trust limits
 
 Skill/reference imports preflight file counts and byte sizes before reading, require byte-exact UTF-8 without a byte-order mark, and reject absolute or traversal paths, duplicate normalized paths, too many files, and excessive byte sizes. Imported content is never executed. Snapshot import additionally enforces a global byte limit, schema version, canonical record identities, blob hash/size integrity, and linear revision lineage.
 
-Standard-native export contains only `SKILL.md` and reference paths. The workbench snapshot is a separate JSON artifact that can retain local revisions, blobs, maps, evidence, and audit events. Admission rejects snapshots containing evaluation or comparison evidence because importer-authored deterministic records have no trusted provenance; Skill content, references, revisions, and other locally recomputable artifacts remain importable, and rejected evidence must be regenerated locally.
+The portable format is one JSON workbench snapshot containing Skill content, reference paths, revisions, maps, and audit events. Export omits evaluation and comparison evidence, and admission rejects snapshots containing it; those deterministic results must be regenerated locally after import.
 
 ## Deferred scope
 

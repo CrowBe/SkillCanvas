@@ -2,7 +2,7 @@
 
 Skill Canvas is a proof-of-concept, browser-based Agent Skills workbench for the OpenAI WebMCP hackathon. Its thesis is that Skills are high-value but low-visibility: they strongly shape an agent's behavior, yet imported and default Skills often remain invisible while the agent works. That makes basic questions surprisingly hard: What does this Skill do? Is it good? Which instructions are active? What changed when I edited it?
 
-The user brings a browser agent: the agent supplies inference and semantic judgment; the deployed website makes the Skill legible. It renders intent, visualizes structural anatomy, lints deterministic properties, breaks an accepted semantic map into an instruction-load vector, records observed evaluations, compares revisions, and exports the standard-native artifact. These are multiple angles on understanding and improving the same Skill, not a single opaque quality score.
+The user brings a browser agent: the agent supplies inference and semantic judgment; the deployed website makes the Skill legible. It renders intent, visualizes structural anatomy, lints deterministic properties, breaks an accepted semantic map into an instruction-load vector, records observed evaluations, compares revisions, and exports a portable evidence-free JSON snapshot. These are multiple angles on understanding and improving the same Skill, not a single opaque quality score.
 
 There are no accounts, provider keys, server-side model gateway, teams, publishing flow, or whole-agent configuration. The static app remains fully useful when WebMCP is unavailable. IndexedDB is the current deployment-friendly persistence adapter, and the welcome screen lists workspaces saved in the current browser profile so they remain reachable after a session ends. This is not a claim that the product must remain local-first.
 
@@ -29,9 +29,7 @@ Deploy `dist/` to any HTTPS static host. For a deployed WebMCP origin, enrol tha
 4. Save a full-source replacement against `baseRevision`. A stale base returns `revision_conflict`; it never overwrites silently.
 5. Validate a visiting-agent instruction-map proposal and inspect its multidimensional load vector.
 6. Prepare a triggering evaluation one case at a time, or a mocked test run driven by one Tool contract and optional Response schema.
-7. Compare revisions and export either:
-   - a standard-native zip containing only `SKILL.md` and references; or
-   - a versioned workbench snapshot containing revisions, accepted maps, local evidence, and audit events.
+7. Compare revisions and export a versioned evidence-free JSON workbench snapshot containing Skill content, references, revisions, accepted maps, and audit events.
 8. Restore an evidence-free workbench snapshot from the welcome screen, history panel, or `workspace_snapshot_import` WebMCP tool. Snapshots containing evaluation or comparison evidence are rejected; import the Skill and references without that evidence and regenerate it locally.
 
 ## Architecture
@@ -102,7 +100,7 @@ The Chrome DevTools MCP server can instead expose `list_webmcp_tools` and `execu
 - Immutable Skill/reference blobs deduplicate by byte-exact SHA-256.
 - Revision, artifact, evaluation, and audit records point to hashes and carry explicit versions.
 - Skill mutations require `baseRevision`, append an audit event, visibly update the UI, and remain reversible by adding a later revision.
-- `appearance_set` is a visible browser preference. It never changes a Skill revision, content hash, evaluation artifact, snapshot, or Skill export.
+- `appearance_set` is a visible browser preference. It never changes a Skill revision, content hash, evaluation artifact, or snapshot.
 - Instruction decomposition, trigger choices, rationales, model/browser identity, latency, and outputs are agent-supplied evidence. Deterministic validation and grading are reported separately.
 - A triggering result is labelled as observed from the visiting browser agent. It is not runtime-portability proof.
 
@@ -136,7 +134,7 @@ Adapted for this browser-agent proof:
 - model-backed triggering is split into prepare/submit so the visiting browser agent performs selection;
 - test runs register a run-scoped mock through WebMCP when available and retain a visible manual invocation fallback;
 - hosted persistence uses browser IndexedDB rather than server persistence;
-- exported workbench snapshots retain local evidence separately from the standard-native Skill export, while snapshot admission rejects evaluation and comparison evidence that cannot cross the local trust boundary.
+- exported workbench snapshots omit local evaluation and comparison evidence, and snapshot admission rejects those records so they must be regenerated locally.
 
 Deliberately not copied:
 

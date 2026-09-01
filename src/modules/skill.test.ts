@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { analyzeLint, analyzeStructure } from "./analysis";
+import { SKILL_MAX_BYTES } from "./shared";
 import { parseSkillMd, serializeSkillMd } from "./skill";
 
 const RAW = `---
@@ -32,6 +33,16 @@ describe("SKILL.md source", () => {
     );
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.error.code).toBe("invalid_skill");
+  });
+
+  it("enforces the byte limit before normalizing line endings", () => {
+    const oversized = `${RAW}${"x\r\n".repeat(100_000)}`;
+    expect(new TextEncoder().encode(oversized).byteLength).toBeGreaterThan(
+      SKILL_MAX_BYTES,
+    );
+    const parsed = parseSkillMd(oversized);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error.code).toBe("size_limit");
   });
 
   it("emits stable lint rules and valid source spans", () => {

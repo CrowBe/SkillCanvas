@@ -35,9 +35,9 @@ export function skillFrontmatterBounds(
 }
 
 export function parseSkillMd(rawInput: string): Result<SkillSource> {
-  const raw = rawInput.replace(/\r\n/g, "\n");
-  if (byteLength(raw) > SKILL_MAX_BYTES)
+  if (byteLength(rawInput) > SKILL_MAX_BYTES)
     return err("size_limit", `SKILL.md exceeds ${SKILL_MAX_BYTES} bytes.`);
+  const raw = rawInput.replace(/\r\n/g, "\n");
   const bounds = skillFrontmatterBounds(raw);
   if (!raw.startsWith("---\n"))
     return err("invalid_skill", "SKILL.md must begin with YAML frontmatter.");

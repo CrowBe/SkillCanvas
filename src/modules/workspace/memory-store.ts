@@ -276,12 +276,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
         artifact.workspaceId !== input.workspaceId ||
         artifact.revision !== input.revision ||
         (existing && existing.workspaceId !== input.workspaceId) ||
-        (existing &&
-          [
-            "compare",
-            "comparison-evaluation-state",
-            "evaluation-transition",
-          ].includes(artifact.kind))
+        (existing && artifact.kind === "compare")
       )
         throw new DomainMutationError(
           domainError(
@@ -311,7 +306,6 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
   async recordEvaluationEvidence(
     evaluation: EvaluationRecord,
     expected?: EvaluationRecord,
-    transition?: ArtifactRecord,
   ): Promise<void> {
     this.requireEvidenceRevision(
       evaluation.workspaceId,
@@ -332,21 +326,6 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     const previous = this.buildSnapshot(evaluation.workspaceId);
     const previousGeneration =
       this.generations.get(evaluation.workspaceId) ?? 0;
-    if (transition) {
-      if (
-        transition.workspaceId !== evaluation.workspaceId ||
-        transition.revision !== evaluation.revision ||
-        transition.kind !== "evaluation-transition" ||
-        this.state.artifacts.has(transition.id)
-      )
-        throw new DomainMutationError(
-          domainError(
-            "revision_conflict",
-            "Evaluation transition history changed before it was saved.",
-          ),
-        );
-      this.state.artifacts.set(transition.id, structuredClone(transition));
-    }
     this.state.evaluations.set(evaluation.id, structuredClone(evaluation));
     this.bumpGeneration(evaluation.workspaceId);
     const sizeIssue = this.enforcePortableBudget(
