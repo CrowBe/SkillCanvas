@@ -5,17 +5,18 @@ import {
   portableSnapshotSizeError,
   type AdmittedSnapshot,
 } from "./snapshot-admission";
-import type {
-  ArtifactRecord,
-  AuditEvent,
-  BlobRecord,
-  EvaluationRecord,
-  SkillRevision,
-  WorkspaceBundle,
-  WorkspaceRecord,
-  WorkspaceReplacementTarget,
-  WorkspaceSnapshot,
-  WorkspaceStore,
+import {
+  sameWorkspace,
+  type ArtifactRecord,
+  type AuditEvent,
+  type BlobRecord,
+  type EvaluationRecord,
+  type SkillRevision,
+  type WorkspaceBundle,
+  type WorkspaceRecord,
+  type WorkspaceReplacementTarget,
+  type WorkspaceSnapshot,
+  type WorkspaceStore,
 } from "./types";
 
 const DATABASE_NAME = "skill-canvas-workspaces";
@@ -65,21 +66,6 @@ const persistenceError = (
   message: string,
   details?: Record<string, unknown>,
 ): DomainError => ({ code, message, ...(details ? { details } : {}) });
-
-function sameWorkspace(
-  left: WorkspaceRecord | undefined,
-  right: WorkspaceRecord,
-): boolean {
-  return (
-    left !== undefined &&
-    left.id === right.id &&
-    left.name === right.name &&
-    left.currentRevision === right.currentRevision &&
-    left.createdAt === right.createdAt &&
-    left.updatedAt === right.updatedAt &&
-    left.ephemeral === right.ephemeral
-  );
-}
 
 function sameRecord(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -811,21 +797,21 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     await this.hydrate();
     return this.commitMutation(
       async (staged) => {
-        // Land against this tab's mirror; the confirmed target is re-checked
-        // against durable storage by the "replace" persist condition below.
-        const localTarget = await this.memory.getReplacementTarget(
+        // Land against this tab's mirror. Whether the confirmed target is
+        // still current is decided against durable storage by the "replace"
+        // persist condition below, so it is not re-asked here; the mirror only
+        // has to know the workspace it is replacing.
+        const mirrored = await this.memory.getReplacementTarget(
           snapshot.workspace.id,
         );
-        if (replacementTarget && "code" in localTarget)
+        if (replacementTarget && "code" in mirrored)
           return persistenceError(
             "revision_conflict",
             "The saved workspace changed after replacement was confirmed.",
           );
         const conflict = this.memory.landingConflict(
           snapshot,
-          replacementTarget && !("code" in localTarget)
-            ? localTarget
-            : undefined,
+          replacementTarget !== undefined,
         );
         return (
           conflict ??

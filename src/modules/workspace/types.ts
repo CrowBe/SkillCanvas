@@ -33,6 +33,22 @@ export type WorkspaceReplacementTarget = {
   readonly workspace: WorkspaceRecord;
   readonly generation: number;
 };
+
+/** True when `left` is the same saved Workspace as `right`, field for field. */
+export function sameWorkspace(
+  left: WorkspaceRecord | undefined,
+  right: WorkspaceRecord,
+): boolean {
+  return (
+    left !== undefined &&
+    left.id === right.id &&
+    left.name === right.name &&
+    left.currentRevision === right.currentRevision &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    left.ephemeral === right.ephemeral
+  );
+}
 export type ArtifactRecord = {
   readonly id: string;
   readonly workspaceId: string;

@@ -6,17 +6,18 @@ import {
   sha256,
   type DomainError,
 } from "../shared";
-import type {
-  ArtifactRecord,
-  AuditEvent,
-  BlobRecord,
-  EvaluationRecord,
-  SkillRevision,
-  WorkspaceBundle,
-  WorkspaceRecord,
-  WorkspaceReplacementTarget,
-  WorkspaceSnapshot,
-  WorkspaceStore,
+import {
+  sameWorkspace,
+  type ArtifactRecord,
+  type AuditEvent,
+  type BlobRecord,
+  type EvaluationRecord,
+  type SkillRevision,
+  type WorkspaceBundle,
+  type WorkspaceRecord,
+  type WorkspaceReplacementTarget,
+  type WorkspaceSnapshot,
+  type WorkspaceStore,
 } from "./types";
 import {
   PortableSnapshotSizeError,
@@ -374,38 +375,57 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     snapshot: AdmittedSnapshot,
     replacementTarget?: WorkspaceReplacementTarget,
   ): Promise<WorkspaceBundle | DomainError> {
-    const conflict = this.landingConflict(snapshot, replacementTarget);
+    if (
+      replacementTarget &&
+      this.replacementIsStale(snapshot.workspace.id, replacementTarget)
+    )
+      return domainError(
+        "revision_conflict",
+        "The saved workspace changed after replacement was confirmed.",
+      );
+    const conflict = this.landingConflict(
+      snapshot,
+      replacementTarget !== undefined,
+    );
     if (conflict) return conflict;
     if (replacementTarget) this.removeWorkspace(snapshot.workspace.id);
     return this.insertSnapshot(snapshot);
   }
 
   /**
-   * Whether an admitted snapshot can land here: the id must be free, or the
-   * confirmed replacement target must still match what is stored, and no child
-   * record may collide with one belonging to another workspace.
+   * Whether the Workspace saved here has moved on since a replacement was
+   * confirmed against `target`. Only a store holding the durable copy can
+   * answer this; a mirror answers for the mirror.
+   */
+  replacementIsStale(
+    workspaceId: string,
+    target: WorkspaceReplacementTarget,
+  ): boolean {
+    return (
+      !sameWorkspace(
+        this.state.workspaces.get(workspaceId),
+        target.workspace,
+      ) || this.generations.get(workspaceId) !== target.generation
+    );
+  }
+
+  /**
+   * Whether an admitted snapshot's records can land here: the id must be free
+   * unless a replacement is intended, and no child record may collide with one
+   * belonging to another workspace. Whether a confirmed replacement target is
+   * still current is a separate question, answered by `replacementIsStale`.
    */
   landingConflict(
     snapshot: WorkspaceSnapshot,
-    replacementTarget?: WorkspaceReplacementTarget,
+    replacing: boolean,
   ): DomainError | null {
     const existingWorkspace = this.state.workspaces.get(snapshot.workspace.id);
-    if (
-      replacementTarget &&
-      (!sameWorkspace(existingWorkspace, replacementTarget.workspace) ||
-        this.generations.get(snapshot.workspace.id) !==
-          replacementTarget.generation)
-    )
-      return domainError(
-        "revision_conflict",
-        "The saved workspace changed after replacement was confirmed.",
-      );
-    if (existingWorkspace && !replacementTarget)
+    if (existingWorkspace && !replacing)
       return domainError(
         "invalid_snapshot",
         "A workspace with this id already exists and requires confirmed replacement.",
       );
-    const replaced = replacementTarget ? snapshot.workspace.id : undefined;
+    const replaced = replacing ? snapshot.workspace.id : undefined;
     return (
       existingRecordCollision(
         snapshot.artifacts,
@@ -576,19 +596,4 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
       auditEvents: this.workspaceValues(this.state.auditEvents, workspace.id),
     };
   }
-}
-
-function sameWorkspace(
-  left: WorkspaceRecord | undefined,
-  right: WorkspaceRecord,
-): boolean {
-  return (
-    left !== undefined &&
-    left.id === right.id &&
-    left.name === right.name &&
-    left.currentRevision === right.currentRevision &&
-    left.createdAt === right.createdAt &&
-    left.updatedAt === right.updatedAt &&
-    left.ephemeral === right.ephemeral
-  );
 }

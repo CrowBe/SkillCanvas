@@ -263,18 +263,18 @@ export function App({
       ...current.filter((workspace) => workspace.id !== next.workspace.id),
     ]);
     setSource(next.skillMd);
-    const view = workspaceView(next);
-    setLint(view.lint);
-    setStructure(view.structure);
-    setInstructionVector(view.instructionLoad);
-    setInstructionMap(view.instructionMap);
+    const projection = workspaceView(next);
+    setLint(projection.lint);
+    setStructure(projection.structure);
+    setInstructionVector(projection.instructionLoad);
+    setInstructionMap(projection.instructionMap);
     setInstructionJson(
-      view.instructionMap
-        ? JSON.stringify(view.instructionMap, null, 2)
+      projection.instructionMap
+        ? JSON.stringify(projection.instructionMap, null, 2)
         : instructionMapDraft(next.revision.revision),
     );
-    setCompare(view.compare);
-    setEvaluation(view.evaluation);
+    setCompare(projection.compare);
+    setEvaluation(projection.evaluation);
     setStatus(`Revision ${next.revision.revision} loaded`);
   }
   async function create(skillMd = SAMPLE_SKILL) {
