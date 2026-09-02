@@ -36,7 +36,7 @@ Dependencies point inward. React, `document.modelContext`, downloads, browser st
 - append audit event;
 - import/export a bounded versioned snapshot.
 
-The IndexedDB schema is versioned. Separate object stores hold workspaces, revisions, byte-exact blobs, artifacts, evaluation records, and audit events. Immutable Skill/reference content is SHA-256-addressed and deduplicated without normalizing line endings. Revision records point to a Skill blob and normalized reference pointers. The welcome screen discovers saved workspaces through the store's list operation; the current-workspace id is only a session convenience in `sessionStorage`. Theme/view are the only small `localStorage` preferences.
+The IndexedDB schema is versioned. Separate object stores hold workspaces, revisions, byte-exact blobs, artifacts, evaluation records, and audit events. Immutable Skill/reference content is SHA-256-addressed and deduplicated without normalizing line endings. Revision records point to a Skill blob and normalized reference pointers. Evaluation writes measure the transaction's merged workspace snapshot before commit, so concurrent tabs cannot exceed the portable budget with individually valid records. Comparison writes atomically replace any prior comparison across the workspace. The welcome screen discovers saved workspaces through the store's list operation; the current-workspace id is only a session convenience in `sessionStorage`. Theme/view are the only small `localStorage` preferences.
 
 Every mutation that changes Skill content takes a base revision. A stale mutation returns:
 
@@ -57,7 +57,7 @@ No mutation overwrites a revision. Reversal means appending another revision.
 
 Lint and structure are deterministic analysis capabilities. Findings carry stable rule id, severity, message, optional Source-span, score, grade, counts, and ruleset version. Clicking a finding changes to Source view and selects its character range.
 
-Instruction decomposition is different: the visiting agent submits atomic requirements with an exact Source-span, normalized statement, kind, scope, dependency references, and verifiability. Browser code validates spans, ids, references, and cycles. The record remains labelled `visiting-agent proposal`; acceptance is an explicit human/workflow action.
+Instruction decomposition is different: the visiting agent submits atomic requirements with an exact Source-span, normalized statement, kind, scope, dependency references, and verifiability. Browser code validates spans, ids, references, and cycles. The persisted map is restored with its revision and rendered as an accessible requirement/dependency list. The record remains labelled `visiting-agent proposal`; acceptance is an explicit human/workflow action.
 
 Accepted maps yield an instruction-load vector, never a semantic count inferred from tokens, bullets, or imperative regexes:
 

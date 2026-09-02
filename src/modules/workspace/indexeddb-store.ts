@@ -1,6 +1,7 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { DomainMutationError, type DomainError } from "../shared";
 import { MemoryWorkspaceStore } from "./memory-store";
+import { portableSnapshotSizeError } from "./snapshot-budget";
 import type {
   ArtifactRecord,
   AuditEvent,
@@ -100,6 +101,40 @@ function persistedRevision(revision: SkillRevision): PersistedRevision {
 function domainRevision(value: PersistedRevision): SkillRevision {
   const { key: _, blobHashes: __, ...revision } = value;
   return revision;
+}
+
+async function workspaceSnapshotInTransaction(
+  transaction: any,
+  persisted: PersistedWorkspace,
+): Promise<WorkspaceSnapshot> {
+  const workspaceId = persisted.id;
+  const revisions = (await transaction
+    .objectStore("revisions")
+    .index("workspaceId")
+    .getAll(workspaceId)) as PersistedRevision[];
+  const [artifacts, evaluations, auditEvents] = (await Promise.all(
+    ["artifacts", "evaluations", "auditEvents"].map((store) =>
+      transaction.objectStore(store).index("workspaceId").getAll(workspaceId),
+    ),
+  )) as [ArtifactRecord[], EvaluationRecord[], AuditEvent[]];
+  const hashes = [
+    ...new Set(revisions.flatMap((revision) => revision.blobHashes)),
+  ];
+  const blobs = (
+    await Promise.all(
+      hashes.map((hash) => transaction.objectStore("blobs").get(hash)),
+    )
+  ).filter((blob): blob is BlobRecord => blob !== undefined);
+  return {
+    snapshotVersion: 1,
+    exportedAt: new Date().toISOString(),
+    workspace: domainWorkspace(persisted),
+    revisions: revisions.map(domainRevision),
+    blobs,
+    artifacts,
+    evaluations,
+    auditEvents,
+  };
 }
 
 function installIndexes(transaction: any): void {
@@ -280,6 +315,8 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       ? domainWorkspace(persistedWorkspace)
       : undefined;
     const generation = persistedWorkspace?.persistenceGeneration ?? 0;
+    let artifactDeleteIds =
+      condition.kind === "artifacts" ? [...condition.deleteIds] : [];
 
     let conflict: DomainError | null = null;
     if (condition.kind === "create" && persistedWorkspace)
@@ -360,6 +397,23 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
         ),
       );
       if (
+        condition.kind === "artifacts" &&
+        records.some((record) => record.kind === "compare")
+      ) {
+        const persistedArtifacts = (await transaction
+          .objectStore("artifacts")
+          .index("workspaceId")
+          .getAll(workspaceId)) as ArtifactRecord[];
+        artifactDeleteIds = [
+          ...new Set([
+            ...artifactDeleteIds,
+            ...persistedArtifacts
+              .filter((artifact) => artifact.kind === "compare")
+              .map((artifact) => artifact.id),
+          ]),
+        ];
+      }
+      if (
         existingRecords.some(
           (existing) => existing && existing.workspaceId !== workspaceId,
         )
@@ -397,10 +451,26 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
           "revision_conflict",
           "Evaluation evidence changed in another browser tab.",
         );
+      if (!conflict && condition.kind === "evaluation" && persistedWorkspace) {
+        const current = await workspaceSnapshotInTransaction(
+          transaction,
+          persistedWorkspace,
+        );
+        const sizeIssue = portableSnapshotSizeError({
+          ...current,
+          evaluations: [
+            ...current.evaluations.filter(
+              (evaluation) => evaluation.id !== condition.record.id,
+            ),
+            condition.record,
+          ],
+        });
+        if (sizeIssue) conflict = sizeIssue;
+      }
       if (!conflict) {
         if (condition.kind === "artifacts") {
           const deleted = await Promise.all(
-            condition.deleteIds.map((id) =>
+            artifactDeleteIds.map((id) =>
               transaction.objectStore("artifacts").get(id),
             ),
           );
@@ -421,7 +491,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
             transaction.objectStore(storeName).put(record),
           ),
           ...(condition.kind === "artifacts"
-            ? condition.deleteIds.map((id) =>
+            ? artifactDeleteIds.map((id) =>
                 transaction.objectStore("artifacts").delete(id),
               )
             : []),

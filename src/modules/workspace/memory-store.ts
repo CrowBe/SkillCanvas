@@ -255,6 +255,16 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     artifacts: readonly ArtifactRecord[];
     deleteIds?: readonly string[];
   }): Promise<void> {
+    const comparisons = input.artifacts.filter(
+      (artifact) => artifact.kind === "compare",
+    );
+    if (comparisons.length > 1)
+      throw new DomainMutationError(
+        domainError(
+          "invalid_snapshot",
+          "Only one comparison artifact may be stored per workspace.",
+        ),
+      );
     if (
       (this.generations.get(input.workspaceId) ?? 0) !==
       input.expectedGeneration
@@ -292,6 +302,13 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     }
     const previous = this.buildSnapshot(input.workspaceId);
     const previousGeneration = this.generations.get(input.workspaceId) ?? 0;
+    if (comparisons.length === 1)
+      for (const [id, artifact] of this.state.artifacts)
+        if (
+          artifact.workspaceId === input.workspaceId &&
+          artifact.kind === "compare"
+        )
+          this.state.artifacts.delete(id);
     for (const id of input.deleteIds ?? []) this.state.artifacts.delete(id);
     for (const artifact of input.artifacts)
       this.state.artifacts.set(artifact.id, structuredClone(artifact));

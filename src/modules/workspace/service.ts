@@ -298,9 +298,6 @@ export function createWorkspaceService(
           artifacts: [
             artifact(after.value, "compare", data, createdAt, comparisonId),
           ],
-          deleteIds: after.value.artifacts
-            .filter((item) => item.kind === "compare")
-            .map((item) => item.id),
         });
       } catch (error) {
         return snapshotMutationFailure(error);

@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelContextAdapter, WebMcpTool } from "./modules/webmcp";
@@ -197,6 +198,80 @@ describe("App WebMCP registration lifecycle", () => {
 
     expect(await screen.findByText("Constraint")).toBeInTheDocument();
     expect(screen.getByText("Do not delete files.")).toBeInTheDocument();
+  });
+
+  it("restores and visualizes persisted instruction dependencies", async () => {
+    const workspaceService = createWorkspaceService(new MemoryWorkspaceStore());
+    const skillMd = `${EMPTY_SKILL}\nRead the request.\nThen answer carefully.`;
+    const created = await workspaceService.create({
+      name: "Mapped instructions",
+      skillMd,
+    });
+    if (!created.ok) throw new Error(created.error.message);
+    const readStart = skillMd.indexOf("Read the request.");
+    const answerStart = skillMd.indexOf("Then answer carefully.");
+    const submitted = await workspaceService.submitInstructionMap(
+      created.value.workspace.id,
+      {
+        revision: 1,
+        suppliedBy: "visiting-agent proposal",
+        status: "proposed",
+        scopes: [{ id: "root", label: "Whole Skill" }],
+        requirements: [
+          {
+            id: "read",
+            sourceSpan: {
+              start: readStart,
+              end: readStart + "Read the request.".length,
+            },
+            statement: "Read the request.",
+            kind: "action",
+            scopeId: "root",
+            dependencies: [],
+            verifiability: "semantic-judgment",
+          },
+          {
+            id: "answer",
+            sourceSpan: {
+              start: answerStart,
+              end: answerStart + "Then answer carefully.".length,
+            },
+            statement: "Then answer carefully.",
+            kind: "constraint",
+            scopeId: "root",
+            dependencies: ["read"],
+            verifiability: "semantic-judgment",
+          },
+        ],
+      },
+      true,
+    );
+    if (!submitted.ok) throw new Error(submitted.error.message);
+
+    const { App } = await import("./App");
+    render(<App workspaceService={workspaceService} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Mapped instructions Revision 1/,
+      }),
+    );
+    await screen.findByTestId("skill-hero");
+    fireEvent.click(screen.getByRole("button", { name: /Map/ }));
+
+    const dependencyRegion = await screen.findByRole("region", {
+      name: "Instruction requirements and dependencies",
+    });
+    expect(dependencyRegion).toBeInTheDocument();
+    expect(
+      within(dependencyRegion).getByText("Then answer carefully."),
+    ).toBeInTheDocument();
+    expect(
+      within(dependencyRegion).getByText(/Depends on:\s*Read the request\./),
+    ).toBeInTheDocument();
+    expect(
+      (screen.getByLabelText("Instruction map JSON") as HTMLTextAreaElement)
+        .value,
+    ).toContain('"status": "accepted"');
   });
 
   it("preflights selected file bounds before reading any bytes", async () => {

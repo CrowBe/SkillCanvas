@@ -11,7 +11,10 @@ import {
 } from "./modules/appearance";
 import { parseSkillMd } from "./modules/skill";
 import { type LintArtifact, type StructureArtifact } from "./modules/analysis";
-import { type InstructionLoadVector } from "./modules/instruction-map";
+import {
+  type InstructionLoadVector,
+  type InstructionMap,
+} from "./modules/instruction-map";
 import {
   type TriggeringRunData,
   type TestRunData,
@@ -42,6 +45,18 @@ import {
 const store = new IndexedDbWorkspaceStore();
 const service = createWorkspaceService(store);
 const appearance = createBrowserAppearanceController();
+const instructionMapDraft = (revision: number) =>
+  JSON.stringify(
+    {
+      revision,
+      suppliedBy: "visiting-agent proposal",
+      status: "proposed",
+      scopes: [{ id: "root", label: "Whole Skill" }],
+      requirements: [],
+    },
+    null,
+    2,
+  );
 const SAMPLE_SKILL = `---
 name: customer-feedback-brief
 description: Use when the user wants customer feedback grouped into themes and actions.
@@ -136,6 +151,9 @@ export function App({
   const [structure, setStructure] = useState<StructureArtifact | null>(null);
   const [instructionVector, setInstructionVector] =
     useState<InstructionLoadVector | null>(null);
+  const [instructionMap, setInstructionMap] = useState<InstructionMap | null>(
+    null,
+  );
   const [compare, setCompare] = useState<CompareArtifact | null>(null);
   const [evaluation, setEvaluation] = useState<EvaluationRecord | null>(null);
   const [mockRegistrations, setMockRegistrations] = useState<
@@ -149,7 +167,7 @@ export function App({
     appearance.readState(),
   );
   const [instructionJson, setInstructionJson] = useState(
-    '{\n  "revision": 1,\n  "suppliedBy": "visiting-agent proposal",\n  "status": "proposed",\n  "scopes": [{"id":"root","label":"Whole Skill"}],\n  "requirements": []\n}',
+    instructionMapDraft(1),
   );
   const [rationale, setRationale] = useState("");
   const [selectedChoice, setSelectedChoice] = useState("");
@@ -256,6 +274,15 @@ export function App({
       (next.artifacts.find((item) => item.kind === "instruction-load")?.data as
         InstructionLoadVector | undefined) ?? null,
     );
+    const persistedInstructionMap = next.artifacts.find(
+      (item) => item.kind === "instruction-map",
+    )?.data as InstructionMap | undefined;
+    setInstructionMap(persistedInstructionMap ?? null);
+    setInstructionJson(
+      persistedInstructionMap
+        ? JSON.stringify(persistedInstructionMap, null, 2)
+        : instructionMapDraft(next.revision.revision),
+    );
     setCompare(
       ([...next.artifacts]
         .filter((item) => item.kind === "compare")
@@ -277,12 +304,6 @@ export function App({
         .at(-1) ?? null,
     );
     setStatus(`Revision ${next.revision.revision} loaded`);
-    setInstructionJson((current) =>
-      current.replace(
-        /"revision":\s*\d+/,
-        `"revision": ${next.revision.revision}`,
-      ),
-    );
   }
   async function create(skillMd = SAMPLE_SKILL) {
     const result = await workspaceService.create({
@@ -513,6 +534,8 @@ export function App({
       accept,
     );
     if (result.ok) {
+      setInstructionMap(result.value.map);
+      setInstructionJson(JSON.stringify(result.value.map, null, 2));
       setInstructionVector(result.value.vector ?? null);
       setStatus(
         accept
@@ -786,6 +809,7 @@ export function App({
         {panel === "instructions" && (
           <InstructionPanel
             json={instructionJson}
+            map={instructionMap}
             vector={instructionVector}
             onChange={setInstructionJson}
             onSubmit={safeSubmitMap}
@@ -1052,15 +1076,20 @@ function LintPanel({
 }
 function InstructionPanel({
   json,
+  map,
   vector,
   onChange,
   onSubmit,
 }: {
   json: string;
+  map: InstructionMap | null;
   vector: InstructionLoadVector | null;
   onChange(value: string): void;
   onSubmit(accept: boolean): void;
 }) {
+  const requirementsById = new Map(
+    map?.requirements.map((requirement) => [requirement.id, requirement]) ?? [],
+  );
   return (
     <div className="panel-stack">
       <div className="boundary-card">
@@ -1091,6 +1120,44 @@ function InstructionPanel({
               value={`${Math.round(vector.deterministicallyVerifiableFraction * 100)}%`}
             />
           </div>
+        </section>
+      )}
+      {map && (
+        <section
+          className="instruction-dependencies"
+          aria-label="Instruction requirements and dependencies"
+        >
+          <div className="instruction-dependencies-heading">
+            <strong>Requirements and dependencies</strong>
+            <span>{map.status}</span>
+          </div>
+          {map.requirements.length === 0 ? (
+            <p>No atomic requirements mapped yet.</p>
+          ) : (
+            <ol>
+              {map.requirements.map((requirement) => (
+                <li key={requirement.id}>
+                  <strong>{requirement.statement}</strong>
+                  <small>
+                    {requirement.kind} · {requirement.scopeId} ·{" "}
+                    {requirement.id}
+                  </small>
+                  <p>
+                    Depends on:{" "}
+                    {requirement.dependencies.length === 0
+                      ? "none"
+                      : requirement.dependencies
+                          .map(
+                            (dependencyId) =>
+                              requirementsById.get(dependencyId)?.statement ??
+                              dependencyId,
+                          )
+                          .join("; ")}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          )}
         </section>
       )}
       <textarea

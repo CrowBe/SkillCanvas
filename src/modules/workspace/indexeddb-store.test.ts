@@ -615,6 +615,83 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     );
   });
 
+  it("replaces comparisons across revisions in one transaction", async () => {
+    const control = databaseControl();
+    const store = new IndexedDbWorkspaceStore(control.database);
+    const service = createWorkspaceService(store);
+    const created = await service.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const id = created.value.workspace.id;
+    const second = await service.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!second.ok) throw new Error(second.error.message);
+    await service.compare(id, 1, 2);
+    const third = await service.update({
+      workspaceId: id,
+      baseRevision: 2,
+      skillMd: `${EMPTY_SKILL}\nThird revision.`,
+      actor: "human",
+    });
+    if (!third.ok) throw new Error(third.error.message);
+    await service.compare(id, 2, 3);
+
+    const snapshot = await store.exportSnapshot(id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    const comparisons = snapshot.artifacts.filter(
+      (artifact) => artifact.kind === "compare",
+    );
+    expect(comparisons).toHaveLength(1);
+    expect((comparisons[0]!.data as any).afterRevision).toBe(3);
+  });
+
+  it("enforces the portable budget against concurrent evaluation records", async () => {
+    const control = databaseControl();
+    const first = createWorkspaceService(
+      new IndexedDbWorkspaceStore(control.database),
+    );
+    const created = await first.create({ skillMd: EMPTY_SKILL });
+    if (!created.ok) throw new Error(created.error.message);
+    const second = createWorkspaceService(
+      new IndexedDbWorkspaceStore(control.database),
+    );
+    const opened = await second.open(created.value.workspace.id);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const contract = (name: string) => ({
+      name,
+      description: "Large deterministic fixture",
+      inputSchema: { type: "object" as const },
+      outputSchema: { type: "string" as const },
+      mockOutput: "x".repeat(1_050_000),
+    });
+
+    const accepted = await first.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      { contract: contract("first_large_fixture") },
+    );
+    if (!accepted.ok) throw new Error(accepted.error.message);
+    const rejected = await second.prepareEvaluation(
+      created.value.workspace.id,
+      "test-run",
+      { contract: contract("second_large_fixture") },
+    );
+
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe("size_limit");
+    const reader = createWorkspaceService(
+      new IndexedDbWorkspaceStore(control.database),
+    );
+    const current = await reader.open(created.value.workspace.id);
+    if (!current.ok) throw new Error(current.error.message);
+    expect(
+      current.value.evaluations.map((evaluation) => evaluation.id),
+    ).toEqual([accepted.value.id]);
+  });
+
   it("rejects concurrent evaluation updates through one store", async () => {
     const control = databaseControl();
     const service = createWorkspaceService(

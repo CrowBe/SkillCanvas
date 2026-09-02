@@ -27,7 +27,7 @@ Deploy `dist/` to any HTTPS static host. For a deployed WebMCP origin, enrol tha
 2. Read the Rendered view and Skill anatomy first; jump from structural or lint findings to the exact Source-span.
 3. Ask what it does, whether its deterministic properties are sound, and where complexity comes from before editing.
 4. Save a full-source replacement against `baseRevision`. A stale base returns `revision_conflict`; it never overwrites silently.
-5. Validate a visiting-agent instruction-map proposal and inspect its multidimensional load vector.
+5. Validate a visiting-agent instruction-map proposal, inspect its persisted requirements and dependency edges, and review its multidimensional load vector.
 6. Prepare a triggering evaluation one case at a time, or a mocked test run driven by one Tool contract and optional Response schema.
 7. Compare revisions and export a versioned evidence-free JSON workbench snapshot containing Skill content, references, revisions, accepted maps, and audit events.
 8. Restore an evidence-free workbench snapshot from the welcome screen, history panel, or `workspace_snapshot_import` WebMCP tool. Snapshots containing evaluation or comparison evidence are rejected; import the Skill and references without that evidence and regenerate it locally.

@@ -630,21 +630,36 @@ describe("snapshot import schema guards", () => {
 });
 
 describe("portable snapshot evidence boundary", () => {
-  it("keeps only the latest canonical comparison", async () => {
-    const service = createWorkspaceService(new MemoryWorkspaceStore());
+  it("keeps only the latest canonical comparison across revisions", async () => {
+    const store = new MemoryWorkspaceStore();
+    const service = createWorkspaceService(store);
     const created = await service.create({ skillMd: EMPTY_SKILL });
     if (!created.ok) throw new Error(created.error.message);
     const id = created.value.workspace.id;
-
-    await service.compare(id, 1, 1);
-    await service.compare(id, 1, 1);
-    const opened = await service.open(id);
-    if (!opened.ok) throw new Error(opened.error.message);
-    const comparisons = opened.value.artifacts.filter(
+    const second = await service.update({
+      workspaceId: id,
+      baseRevision: 1,
+      skillMd: `${EMPTY_SKILL}\nSecond revision.`,
+      actor: "human",
+    });
+    if (!second.ok) throw new Error(second.error.message);
+    await service.compare(id, 1, 2);
+    const third = await service.update({
+      workspaceId: id,
+      baseRevision: 2,
+      skillMd: `${EMPTY_SKILL}\nThird revision.`,
+      actor: "human",
+    });
+    if (!third.ok) throw new Error(third.error.message);
+    await service.compare(id, 2, 3);
+    const snapshot = await store.exportSnapshot(id);
+    if ("code" in snapshot) throw new Error(snapshot.message);
+    const comparisons = snapshot.artifacts.filter(
       (artifact) => artifact.kind === "compare",
     );
 
     expect(comparisons).toHaveLength(1);
+    expect((comparisons[0]!.data as any).afterRevision).toBe(3);
     expect(comparisons[0]!.id).toMatch(
       /:compare:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
