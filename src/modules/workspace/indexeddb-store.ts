@@ -113,7 +113,7 @@ async function workspaceSnapshotInTransaction(
     .index("workspaceId")
     .getAll(workspaceId)) as PersistedRevision[];
   const [artifacts, evaluations, auditEvents] = (await Promise.all(
-    ["artifacts", "evaluations", "auditEvents"].map((store) =>
+    (["artifacts", "evaluations", "auditEvents"] as const).map((store) =>
       transaction.objectStore(store).index("workspaceId").getAll(workspaceId),
     ),
   )) as [ArtifactRecord[], EvaluationRecord[], AuditEvent[]];
@@ -249,7 +249,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       .index("workspaceId")
       .getAll(workspaceId)) as PersistedRevision[];
     const [artifacts, evaluations, auditEvents] = (await Promise.all(
-      ["artifacts", "evaluations", "auditEvents"].map((store) =>
+      (["artifacts", "evaluations", "auditEvents"] as const).map((store) =>
         transaction.objectStore(store).index("workspaceId").getAll(workspaceId),
       ),
     )) as [ArtifactRecord[], EvaluationRecord[], AuditEvent[]];
@@ -398,7 +398,7 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
       );
       if (
         condition.kind === "artifacts" &&
-        records.some((record) => record.kind === "compare")
+        condition.records.some((record) => record.kind === "compare")
       ) {
         const persistedArtifacts = (await transaction
           .objectStore("artifacts")

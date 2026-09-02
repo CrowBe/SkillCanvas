@@ -29,7 +29,6 @@ import {
   REFERENCE_MAX_BYTES,
   REFERENCES_MAX,
   RULESET_VERSION,
-  sha256,
   SNAPSHOT_MAX_BYTES,
   type DomainError,
   type Result,

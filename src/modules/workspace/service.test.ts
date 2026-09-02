@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SNAPSHOT_MAX_BYTES, byteLength, sha256 } from "../shared";
+import { SNAPSHOT_MAX_BYTES, byteLength } from "../shared";
 import { EMPTY_SKILL } from "../skill";
 import { MemoryWorkspaceStore } from "./memory-store";
 import { createWorkspaceService } from "./service";

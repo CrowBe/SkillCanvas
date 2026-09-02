@@ -34,7 +34,9 @@ function exactFile(
   type?: string,
 ): File {
   const bytes =
-    typeof content === "string" ? new TextEncoder().encode(content) : content;
+    typeof content === "string"
+      ? new TextEncoder().encode(content)
+      : Uint8Array.from(content);
   return Object.assign(new File([bytes], name, { type }), {
     arrayBuffer: async () => Uint8Array.from(bytes).buffer,
   });

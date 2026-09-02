@@ -180,6 +180,7 @@ describe("WebMCP adapter", () => {
       {
         contract: {
           name: "read_items",
+          description: "Read items.",
           inputSchema: { type: "object" },
           outputSchema: { type: "object" },
         },
@@ -366,6 +367,7 @@ describe("WebMCP adapter", () => {
         kind: "test-run",
         contract: {
           name: "read_items",
+          description: "Read items.",
           inputSchema: { type: "object" },
           outputSchema: { type: "object" },
         },
