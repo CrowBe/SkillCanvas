@@ -166,6 +166,13 @@ export async function prepareTriggering(
   };
 }
 
+/** The case awaiting an observation, or undefined once every case is answered. */
+export function nextTriggerCase(
+  data: TriggeringRunData,
+): TriggerCase | undefined {
+  return data.cases[data.observations.length];
+}
+
 export function submitTriggering(
   record: EvaluationRecord,
   submission: unknown,
@@ -203,7 +210,7 @@ export function submitTriggering(
       "evaluation_complete",
       "This triggering evaluation is already complete.",
     );
-  const nextCase = data.cases[data.observations.length];
+  const nextCase = nextTriggerCase(data);
   if (!nextCase || nextCase.id !== input.caseId)
     return err(
       "invalid_submission",

@@ -21,7 +21,8 @@ import type {
 import {
   PortableSnapshotSizeError,
   portableSnapshotSizeError,
-} from "./snapshot-budget";
+  type AdmittedSnapshot,
+} from "./snapshot-admission";
 
 type State = {
   workspaces: Map<string, WorkspaceRecord>;
@@ -38,30 +39,24 @@ const domainError = (
   details?: Record<string, unknown>,
 ): DomainError => ({ code, message, ...(details ? { details } : {}) });
 
-function snapshotRecordError<T extends { id: string; workspaceId: string }>(
+/**
+ * Whether any incoming child record would overwrite a record this store
+ * already holds for a different workspace. Purely a property of what is
+ * stored here; the snapshot's own consistency is settled before it arrives.
+ */
+function existingRecordCollision<T extends { id: string; workspaceId: string }>(
   records: readonly T[],
   existing: ReadonlyMap<string, T>,
-  workspaceId: string,
   label: string,
   replacedWorkspaceId?: string,
 ): DomainError | null {
-  const ids = new Set<string>();
   for (const record of records) {
-    if (record.workspaceId !== workspaceId)
-      return domainError(
-        "invalid_snapshot",
-        `Snapshot ${label} records belong to another workspace.`,
-      );
     const existingRecord = existing.get(record.id);
-    if (
-      ids.has(record.id) ||
-      (existingRecord?.workspaceId !== replacedWorkspaceId && existingRecord)
-    )
+    if (existingRecord && existingRecord.workspaceId !== replacedWorkspaceId)
       return domainError(
         "invalid_snapshot",
         `Snapshot ${label} id ${record.id} collides with existing data.`,
       );
-    ids.add(record.id);
   }
   return null;
 }
@@ -234,19 +229,6 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     return this.bundle(nextWorkspace, revision);
   }
 
-  async putArtifact(
-    artifact: ArtifactRecord,
-    expectedContentHash: string,
-    expectedGeneration: number,
-  ): Promise<void> {
-    await this.updateArtifacts({
-      workspaceId: artifact.workspaceId,
-      revision: artifact.revision,
-      expectedContentHash,
-      expectedGeneration,
-      artifacts: [artifact],
-    });
-  }
   async updateArtifacts(input: {
     workspaceId: string;
     revision: number;
@@ -352,18 +334,6 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     );
     if (sizeIssue) throw new PortableSnapshotSizeError(sizeIssue);
   }
-  async appendAuditEvent(event: AuditEvent): Promise<void> {
-    const previous = this.buildSnapshot(event.workspaceId);
-    const previousGeneration = this.generations.get(event.workspaceId) ?? 0;
-    this.state.auditEvents.set(event.id, structuredClone(event));
-    this.bumpGeneration(event.workspaceId);
-    const sizeIssue = this.enforcePortableBudget(
-      event.workspaceId,
-      previous,
-      previousGeneration,
-    );
-    if (sizeIssue) throw new PortableSnapshotSizeError(sizeIssue);
-  }
 
   async exportSnapshot(
     workspaceId: string,
@@ -401,110 +371,61 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
   }
 
   async importSnapshot(
-    snapshot: WorkspaceSnapshot,
-    options: {
-      replaceExisting?: boolean;
-      replacementTarget?: WorkspaceReplacementTarget;
-    } = {},
+    snapshot: AdmittedSnapshot,
+    replacementTarget?: WorkspaceReplacementTarget,
   ): Promise<WorkspaceBundle | DomainError> {
-    const validation = await this.validateSnapshot(snapshot, options);
-    if (validation) return validation;
-    if (options.replaceExisting) this.removeWorkspace(snapshot.workspace.id);
-    return this.admitSnapshot(snapshot);
+    const conflict = this.landingConflict(snapshot, replacementTarget);
+    if (conflict) return conflict;
+    if (replacementTarget) this.removeWorkspace(snapshot.workspace.id);
+    return this.insertSnapshot(snapshot);
   }
 
-  async validateSnapshot(
+  /**
+   * Whether an admitted snapshot can land here: the id must be free, or the
+   * confirmed replacement target must still match what is stored, and no child
+   * record may collide with one belonging to another workspace.
+   */
+  landingConflict(
     snapshot: WorkspaceSnapshot,
-    options: {
-      replaceExisting?: boolean;
-      replacementTarget?: WorkspaceReplacementTarget;
-    } = {},
-  ): Promise<DomainError | null> {
-    const sizeIssue = portableSnapshotSizeError(snapshot);
-    if (sizeIssue) return sizeIssue;
+    replacementTarget?: WorkspaceReplacementTarget,
+  ): DomainError | null {
     const existingWorkspace = this.state.workspaces.get(snapshot.workspace.id);
     if (
-      options.replaceExisting &&
-      (!options.replacementTarget ||
-        !sameWorkspace(
-          existingWorkspace,
-          options.replacementTarget.workspace,
-        ) ||
+      replacementTarget &&
+      (!sameWorkspace(existingWorkspace, replacementTarget.workspace) ||
         this.generations.get(snapshot.workspace.id) !==
-          options.replacementTarget.generation)
+          replacementTarget.generation)
     )
       return domainError(
         "revision_conflict",
         "The saved workspace changed after replacement was confirmed.",
       );
-    if (existingWorkspace && !options.replaceExisting)
+    if (existingWorkspace && !replacementTarget)
       return domainError(
         "invalid_snapshot",
         "A workspace with this id already exists and requires confirmed replacement.",
       );
-    if (snapshot.snapshotVersion !== 1 || snapshot.revisions.length === 0)
-      return domainError(
-        "invalid_snapshot",
-        "Unsupported or empty workspace snapshot.",
-      );
-    for (const blob of snapshot.blobs)
-      if (
-        (await sha256(blob.content)) !== blob.hash ||
-        byteLength(blob.content) !== blob.bytes
-      )
-        return domainError(
-          "invalid_snapshot",
-          `Blob integrity check failed for ${blob.hash}.`,
-        );
-    const revisions = [...snapshot.revisions].sort(
-      (a, b) => a.revision - b.revision,
-    );
-    if (
-      revisions.some(
-        (revision, index) =>
-          revision.revision !== index + 1 ||
-          revision.parentRevision !== (index === 0 ? null : index),
-      )
-    )
-      return domainError("invalid_snapshot", "Revision lineage is invalid.");
-    if (snapshot.workspace.currentRevision !== revisions.at(-1)!.revision)
-      return domainError(
-        "invalid_snapshot",
-        "The current workspace revision must be the lineage tip.",
-      );
-    if (
-      revisions.some(
-        (revision) => revision.workspaceId !== snapshot.workspace.id,
-      )
-    )
-      return domainError(
-        "invalid_snapshot",
-        "Snapshot revisions belong to another workspace.",
-      );
-    const recordError =
-      snapshotRecordError(
+    const replaced = replacementTarget ? snapshot.workspace.id : undefined;
+    return (
+      existingRecordCollision(
         snapshot.artifacts,
         this.state.artifacts,
-        snapshot.workspace.id,
         "artifact",
-        options.replaceExisting ? snapshot.workspace.id : undefined,
+        replaced,
       ) ??
-      snapshotRecordError(
+      existingRecordCollision(
         snapshot.evaluations,
         this.state.evaluations,
-        snapshot.workspace.id,
         "evaluation",
-        options.replaceExisting ? snapshot.workspace.id : undefined,
+        replaced,
       ) ??
-      snapshotRecordError(
+      existingRecordCollision(
         snapshot.auditEvents,
         this.state.auditEvents,
-        snapshot.workspace.id,
         "audit event",
-        options.replaceExisting ? snapshot.workspace.id : undefined,
-      );
-    if (recordError) return recordError;
-    return null;
+        replaced,
+      )
+    );
   }
 
   loadValidatedSnapshot(
@@ -512,10 +433,10 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     options: { replaceExisting?: boolean; generation?: number } = {},
   ): WorkspaceBundle {
     if (options.replaceExisting) this.removeWorkspace(snapshot.workspace.id);
-    return this.admitSnapshot(snapshot, options.generation);
+    return this.insertSnapshot(snapshot, options.generation);
   }
 
-  private admitSnapshot(
+  private insertSnapshot(
     snapshot: WorkspaceSnapshot,
     generation?: number,
   ): WorkspaceBundle {
@@ -549,22 +470,6 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     );
   }
 
-  async restoreWorkspace(
-    workspaceId: string,
-    snapshot?: WorkspaceSnapshot,
-  ): Promise<void> {
-    if (snapshot) {
-      const target = await this.getReplacementTarget(workspaceId);
-      const validation = await this.validateSnapshot(snapshot, {
-        replaceExisting: true,
-        replacementTarget: "code" in target ? undefined : target,
-      });
-      if (validation) throw new Error(validation.message);
-    }
-    this.removeWorkspace(workspaceId);
-    if (snapshot) this.admitSnapshot(snapshot);
-  }
-
   private removeWorkspace(workspaceId: string): void {
     this.generations.delete(workspaceId);
     this.state.workspaces.delete(workspaceId);
@@ -595,7 +500,7 @@ export class MemoryWorkspaceStore implements WorkspaceStore {
     if (!sizeIssue) return null;
     this.removeWorkspace(workspaceId);
     if (previous && !("code" in previous))
-      this.admitSnapshot(previous, previousGeneration);
+      this.insertSnapshot(previous, previousGeneration);
     return sizeIssue;
   }
 

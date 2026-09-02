@@ -1,5 +1,15 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { byteLength, err, ok, SKILL_MAX_BYTES, type Result } from "./shared";
+import {
+  byteLength,
+  err,
+  isJsonObject,
+  normalizeReferencePath,
+  ok,
+  REFERENCE_MAX_BYTES,
+  REFERENCES_MAX,
+  SKILL_MAX_BYTES,
+  type Result,
+} from "./shared";
 
 export type SkillSource = {
   readonly frontmatter: {
@@ -86,3 +96,48 @@ description: Describe when the visiting agent should use this skill.
 
 Describe the workflow and constraints here.
 `;
+
+/**
+ * The rule for admissible Skill content: a parseable SKILL.md plus reference
+ * files with canonical, unique, in-budget paths. Returns the normalized files
+ * in the order they were supplied, so callers can detect noncanonical input by
+ * comparing positions.
+ */
+export function validateSkillInput(
+  skillMd: unknown,
+  files: unknown,
+): Result<readonly { path: string; content: string }[]> {
+  if (typeof skillMd !== "string")
+    return err("invalid_submission", "SKILL.md content must be a string.");
+  if (!Array.isArray(files))
+    return err("invalid_submission", "Reference files must be an array.");
+  const parsed = parseSkillMd(skillMd);
+  if (!parsed.ok) return parsed;
+  if (files.length > REFERENCES_MAX)
+    return err(
+      "size_limit",
+      `A Skill may include at most ${REFERENCES_MAX} reference files.`,
+    );
+  const normalized: { path: string; content: string }[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (
+      !isJsonObject(file) ||
+      typeof file.path !== "string" ||
+      typeof file.content !== "string"
+    )
+      return err(
+        "invalid_submission",
+        "Each reference file requires string path and content fields.",
+      );
+    const path = normalizeReferencePath(file.path);
+    if (!path.ok) return path;
+    if (seen.has(path.value.toLowerCase()))
+      return err("duplicate_path", `Duplicate normalized path: ${path.value}`);
+    if (byteLength(file.content) > REFERENCE_MAX_BYTES)
+      return err("size_limit", `Reference file ${path.value} is too large.`);
+    seen.add(path.value.toLowerCase());
+    normalized.push({ path: path.value, content: file.content });
+  }
+  return ok(normalized);
+}

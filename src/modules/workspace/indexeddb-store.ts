@@ -1,7 +1,10 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { DomainMutationError, type DomainError } from "../shared";
 import { MemoryWorkspaceStore } from "./memory-store";
-import { portableSnapshotSizeError } from "./snapshot-budget";
+import {
+  portableSnapshotSizeError,
+  type AdmittedSnapshot,
+} from "./snapshot-admission";
 import type {
   ArtifactRecord,
   AuditEvent,
@@ -736,20 +739,6 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     );
   }
 
-  async putArtifact(
-    artifact: ArtifactRecord,
-    expectedContentHash: string,
-    expectedGeneration: number,
-  ) {
-    await this.updateArtifacts({
-      workspaceId: artifact.workspaceId,
-      revision: artifact.revision,
-      expectedContentHash,
-      expectedGeneration,
-      artifacts: [artifact],
-    });
-  }
-
   async updateArtifacts(input: {
     workspaceId: string;
     revision: number;
@@ -791,16 +780,6 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     );
   }
 
-  async appendAuditEvent(event: AuditEvent) {
-    await this.hydrate();
-    await this.commitMutation(
-      (staged) => staged.appendAuditEvent(event),
-      () => event.workspaceId,
-      event.workspaceId,
-      () => ({ kind: "audit", record: event }),
-    );
-  }
-
   async exportSnapshot(
     workspaceId: string,
   ): Promise<WorkspaceSnapshot | DomainError> {
@@ -826,29 +805,40 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   }
 
   async importSnapshot(
-    snapshot: WorkspaceSnapshot,
-    options: {
-      replaceExisting?: boolean;
-      replacementTarget?: WorkspaceReplacementTarget;
-    } = {},
+    snapshot: AdmittedSnapshot,
+    replacementTarget?: WorkspaceReplacementTarget,
   ) {
     await this.hydrate();
     return this.commitMutation(
       async (staged) => {
+        // Land against this tab's mirror; the confirmed target is re-checked
+        // against durable storage by the "replace" persist condition below.
         const localTarget = await this.memory.getReplacementTarget(
           snapshot.workspace.id,
         );
-        const validation = await this.memory.validateSnapshot(snapshot, {
-          replaceExisting: options.replaceExisting,
-          replacementTarget: "code" in localTarget ? undefined : localTarget,
-        });
-        return validation ?? staged.loadValidatedSnapshot(snapshot, options);
+        if (replacementTarget && "code" in localTarget)
+          return persistenceError(
+            "revision_conflict",
+            "The saved workspace changed after replacement was confirmed.",
+          );
+        const conflict = this.memory.landingConflict(
+          snapshot,
+          replacementTarget && !("code" in localTarget)
+            ? localTarget
+            : undefined,
+        );
+        return (
+          conflict ??
+          staged.loadValidatedSnapshot(snapshot, {
+            replaceExisting: replacementTarget !== undefined,
+          })
+        );
       },
       (result) => ("code" in result ? undefined : result.workspace.id),
       snapshot.workspace.id,
       () =>
-        options.replaceExisting
-          ? { kind: "replace", target: options.replacementTarget! }
+        replacementTarget
+          ? { kind: "replace", target: replacementTarget }
           : { kind: "create" },
       (error) => error,
     );

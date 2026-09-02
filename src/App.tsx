@@ -15,17 +15,18 @@ import {
   type InstructionLoadVector,
   type InstructionMap,
 } from "./modules/instruction-map";
-import {
-  type TriggeringRunData,
-  type TestRunData,
-  type ToolContract,
-} from "./modules/evaluations";
+import { type ToolContract } from "./modules/evaluations";
 import { IndexedDbWorkspaceStore } from "./modules/workspace/indexeddb-store";
 import {
   createWorkspaceService,
-  type CompareArtifact,
   type WorkspaceService,
 } from "./modules/workspace/service";
+import { type CompareArtifact } from "./modules/workspace/artifacts";
+import {
+  evaluationView,
+  workspaceView,
+  type EvaluationView,
+} from "./modules/workspace/view";
 import type {
   EvaluationRecord,
   WorkspaceBundle,
@@ -155,7 +156,7 @@ export function App({
     null,
   );
   const [compare, setCompare] = useState<CompareArtifact | null>(null);
-  const [evaluation, setEvaluation] = useState<EvaluationRecord | null>(null);
+  const [evaluation, setEvaluation] = useState<EvaluationView | null>(null);
   const [mockRegistrations, setMockRegistrations] = useState<
     Readonly<Record<string, MockRegistrationStatus>>
   >({});
@@ -262,47 +263,18 @@ export function App({
       ...current.filter((workspace) => workspace.id !== next.workspace.id),
     ]);
     setSource(next.skillMd);
-    setLint(
-      (next.artifacts.find((item) => item.kind === "lint")?.data as
-        LintArtifact | undefined) ?? null,
-    );
-    setStructure(
-      (next.artifacts.find((item) => item.kind === "structure")?.data as
-        StructureArtifact | undefined) ?? null,
-    );
-    setInstructionVector(
-      (next.artifacts.find((item) => item.kind === "instruction-load")?.data as
-        InstructionLoadVector | undefined) ?? null,
-    );
-    const persistedInstructionMap = next.artifacts.find(
-      (item) => item.kind === "instruction-map",
-    )?.data as InstructionMap | undefined;
-    setInstructionMap(persistedInstructionMap ?? null);
+    const view = workspaceView(next);
+    setLint(view.lint);
+    setStructure(view.structure);
+    setInstructionVector(view.instructionLoad);
+    setInstructionMap(view.instructionMap);
     setInstructionJson(
-      persistedInstructionMap
-        ? JSON.stringify(persistedInstructionMap, null, 2)
+      view.instructionMap
+        ? JSON.stringify(view.instructionMap, null, 2)
         : instructionMapDraft(next.revision.revision),
     );
-    setCompare(
-      ([...next.artifacts]
-        .filter((item) => item.kind === "compare")
-        .sort(
-          (left, right) =>
-            Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
-            left.id.localeCompare(right.id),
-        )
-        .at(-1)?.data as CompareArtifact | undefined) ?? null,
-    );
-    setEvaluation(
-      [...next.evaluations]
-        .sort(
-          (left, right) =>
-            Date.parse(left.updatedAt) - Date.parse(right.updatedAt) ||
-            Date.parse(left.createdAt) - Date.parse(right.createdAt) ||
-            left.id.localeCompare(right.id),
-        )
-        .at(-1) ?? null,
-    );
+    setCompare(view.compare);
+    setEvaluation(view.evaluation);
     setStatus(`Revision ${next.revision.revision} loaded`);
   }
   async function create(skillMd = SAMPLE_SKILL) {
@@ -428,24 +400,23 @@ export function App({
       "triggering",
     );
     if (result.ok) {
-      setEvaluation(result.value);
+      setEvaluation(evaluationView(result.value));
       setPanel("evaluate");
       setSelectedChoice("");
       setRationale("");
     } else setStatus(result.error.message);
   }
   async function submitTriggeringCase() {
-    if (!bundle || !evaluation) return;
-    const data = evaluation.data as TriggeringRunData;
-    const current = data.cases[data.observations.length];
+    if (!bundle || evaluation?.kind !== "triggering") return;
+    const current = evaluation.nextCase;
     if (!current) return;
     const result = await workspaceService.submitEvaluation(
       bundle.workspace.id,
-      evaluation.id,
+      evaluation.record.id,
       { caseId: current.id, selectedChoiceId: selectedChoice, rationale },
     );
     if (result.ok) {
-      setEvaluation(result.value);
+      setEvaluation(evaluationView(result.value));
       setSelectedChoice("");
       setRationale("");
       setStatus(
@@ -466,7 +437,7 @@ export function App({
       setStatus(result.error.message);
       return;
     }
-    setEvaluation(result.value);
+    setEvaluation(evaluationView(result.value));
     setPanel("evaluate");
     if (registrationRef.current?.available) {
       try {
@@ -491,11 +462,11 @@ export function App({
     if (!bundle || !evaluation) return;
     const result = await workspaceService.invokeMock(
       bundle.workspace.id,
-      evaluation.id,
+      evaluation.record.id,
       { limit: 2 },
     );
     if (result.ok) {
-      setEvaluation(result.value.evaluation);
+      setEvaluation(evaluationView(result.value.evaluation));
       setStatus("Mock call recorded; nothing real was touched.");
     } else setStatus(result.error.message);
   }
@@ -510,12 +481,12 @@ export function App({
     }
     const result = await workspaceService.submitEvaluation(
       bundle.workspace.id,
-      evaluation.id,
+      evaluation.record.id,
       { finalOutput: parsed },
     );
     if (result.ok) {
       registrationRef.current?.unregisterMockForRun(result.value.id);
-      setEvaluation(result.value);
+      setEvaluation(evaluationView(result.value));
       setStatus("Deterministic contract checks complete.");
     } else setStatus(result.error.message);
   }
@@ -830,7 +801,7 @@ export function App({
             setFinalOutput={setFinalOutput}
             onSubmitFinal={safeSubmitFinal}
             mockStatus={
-              evaluation ? mockRegistrations[evaluation.id] : undefined
+              evaluation ? mockRegistrations[evaluation.record.id] : undefined
             }
           />
         )}
@@ -1193,7 +1164,7 @@ function Metric({ label, value }: { label: string; value: string | number }) {
   );
 }
 type EvaluationPanelProps = {
-  evaluation: EvaluationRecord | null;
+  evaluation: EvaluationView | null;
   selected: string;
   setSelected(value: string): void;
   rationale: string;
@@ -1224,13 +1195,11 @@ function EvaluationPanel(props: EvaluationPanelProps) {
       </div>
     );
   if (evaluation.kind === "triggering") {
-    const data = evaluation.data as TriggeringRunData;
-    const current = data.cases[data.observations.length];
-    const passed = data.observations.filter((item) => item.passed).length;
+    const { data, nextCase: current, passed } = evaluation;
     return (
       <div className="panel-stack">
         <div className="run-meta">
-          <span>{evaluation.status}</span>
+          <span>{evaluation.record.status}</span>
           <code>
             {data.observations.length}/{data.cases.length} cases
           </code>
@@ -1293,17 +1262,18 @@ function EvaluationPanel(props: EvaluationPanelProps) {
       </div>
     );
   }
-  const data = evaluation.data as TestRunData;
+  const data = evaluation.data;
   return (
     <div className="panel-stack">
       <div className="run-meta">
-        <span>{evaluation.status}</span>
+        <span>{evaluation.record.status}</span>
         <code>{data.contract.name}</code>
       </div>
       <div className="boundary-card">
         <strong>Mock world only</strong>
         <p>
-          {evaluation.status === "complete" || props.mockStatus === "completed"
+          {evaluation.record.status === "complete" ||
+          props.mockStatus === "completed"
             ? "This run is complete; its run-scoped mock tool is unregistered."
             : props.mockStatus === "registered"
               ? "A run-scoped WebMCP mock tool is registered."
@@ -1400,7 +1370,9 @@ function HistoryPanel({
           onAction={onCompare}
         />
       )}
-      <button onClick={onSnapshot}>Export workbench snapshot</button>
+      <button data-testid="export-snapshot" onClick={onSnapshot}>
+        Export workbench snapshot
+      </button>
       <label className="file-button">
         Import workbench snapshot
         <input

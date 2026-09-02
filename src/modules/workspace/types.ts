@@ -1,5 +1,6 @@
 import type { InstructionLoadVector, InstructionMap } from "../instruction-map";
 import type { DomainError } from "../shared";
+import type { AdmittedSnapshot } from "./snapshot-admission";
 
 export type BlobRecord = {
   readonly hash: string;
@@ -108,11 +109,6 @@ export interface WorkspaceStore {
     referenceFiles?: readonly { path: string; content: string }[];
     actor: AuditEvent["actor"];
   }): Promise<WorkspaceBundle | DomainError>;
-  putArtifact(
-    artifact: ArtifactRecord,
-    expectedContentHash: string,
-    expectedGeneration: number,
-  ): Promise<void>;
   updateArtifacts(input: {
     workspaceId: string;
     revision: number;
@@ -125,17 +121,18 @@ export interface WorkspaceStore {
     evaluation: EvaluationRecord,
     expected?: EvaluationRecord,
   ): Promise<void>;
-  appendAuditEvent(event: AuditEvent): Promise<void>;
   exportSnapshot(workspaceId: string): Promise<WorkspaceSnapshot | DomainError>;
   getReplacementTarget(
     workspaceId: string,
   ): Promise<WorkspaceReplacementTarget | DomainError>;
+  /**
+   * Land an admitted snapshot. Pass the confirmed replacement target to
+   * replace the workspace already stored under this id; omit it to import as
+   * a new workspace, which fails if the id is taken.
+   */
   importSnapshot(
-    snapshot: WorkspaceSnapshot,
-    options?: {
-      replaceExisting?: boolean;
-      replacementTarget?: WorkspaceReplacementTarget;
-    },
+    snapshot: AdmittedSnapshot,
+    replacementTarget?: WorkspaceReplacementTarget,
   ): Promise<WorkspaceBundle | DomainError>;
 }
 
