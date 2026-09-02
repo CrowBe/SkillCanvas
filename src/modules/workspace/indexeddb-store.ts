@@ -1,18 +1,22 @@
 import { openDB, type IDBPDatabase } from "idb";
 import { DomainMutationError, type DomainError } from "../shared";
 import { MemoryWorkspaceStore } from "./memory-store";
-import { portableSnapshotSizeError } from "./snapshot-budget";
-import type {
-  ArtifactRecord,
-  AuditEvent,
-  BlobRecord,
-  EvaluationRecord,
-  SkillRevision,
-  WorkspaceBundle,
-  WorkspaceRecord,
-  WorkspaceReplacementTarget,
-  WorkspaceSnapshot,
-  WorkspaceStore,
+import {
+  portableSnapshotSizeError,
+  type AdmittedSnapshot,
+} from "./snapshot-admission";
+import {
+  sameWorkspace,
+  type ArtifactRecord,
+  type AuditEvent,
+  type BlobRecord,
+  type EvaluationRecord,
+  type SkillRevision,
+  type WorkspaceBundle,
+  type WorkspaceRecord,
+  type WorkspaceReplacementTarget,
+  type WorkspaceSnapshot,
+  type WorkspaceStore,
 } from "./types";
 
 const DATABASE_NAME = "skill-canvas-workspaces";
@@ -62,21 +66,6 @@ const persistenceError = (
   message: string,
   details?: Record<string, unknown>,
 ): DomainError => ({ code, message, ...(details ? { details } : {}) });
-
-function sameWorkspace(
-  left: WorkspaceRecord | undefined,
-  right: WorkspaceRecord,
-): boolean {
-  return (
-    left !== undefined &&
-    left.id === right.id &&
-    left.name === right.name &&
-    left.currentRevision === right.currentRevision &&
-    left.createdAt === right.createdAt &&
-    left.updatedAt === right.updatedAt &&
-    left.ephemeral === right.ephemeral
-  );
-}
 
 function sameRecord(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -736,20 +725,6 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     );
   }
 
-  async putArtifact(
-    artifact: ArtifactRecord,
-    expectedContentHash: string,
-    expectedGeneration: number,
-  ) {
-    await this.updateArtifacts({
-      workspaceId: artifact.workspaceId,
-      revision: artifact.revision,
-      expectedContentHash,
-      expectedGeneration,
-      artifacts: [artifact],
-    });
-  }
-
   async updateArtifacts(input: {
     workspaceId: string;
     revision: number;
@@ -791,16 +766,6 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
     );
   }
 
-  async appendAuditEvent(event: AuditEvent) {
-    await this.hydrate();
-    await this.commitMutation(
-      (staged) => staged.appendAuditEvent(event),
-      () => event.workspaceId,
-      event.workspaceId,
-      () => ({ kind: "audit", record: event }),
-    );
-  }
-
   async exportSnapshot(
     workspaceId: string,
   ): Promise<WorkspaceSnapshot | DomainError> {
@@ -826,29 +791,40 @@ export class IndexedDbWorkspaceStore implements WorkspaceStore {
   }
 
   async importSnapshot(
-    snapshot: WorkspaceSnapshot,
-    options: {
-      replaceExisting?: boolean;
-      replacementTarget?: WorkspaceReplacementTarget;
-    } = {},
+    snapshot: AdmittedSnapshot,
+    replacementTarget?: WorkspaceReplacementTarget,
   ) {
     await this.hydrate();
     return this.commitMutation(
       async (staged) => {
-        const localTarget = await this.memory.getReplacementTarget(
+        // Land against this tab's mirror. Whether the confirmed target is
+        // still current is decided against durable storage by the "replace"
+        // persist condition below, so it is not re-asked here; the mirror only
+        // has to know the workspace it is replacing.
+        const mirrored = await this.memory.getReplacementTarget(
           snapshot.workspace.id,
         );
-        const validation = await this.memory.validateSnapshot(snapshot, {
-          replaceExisting: options.replaceExisting,
-          replacementTarget: "code" in localTarget ? undefined : localTarget,
-        });
-        return validation ?? staged.loadValidatedSnapshot(snapshot, options);
+        if (replacementTarget && "code" in mirrored)
+          return persistenceError(
+            "revision_conflict",
+            "The saved workspace changed after replacement was confirmed.",
+          );
+        const conflict = this.memory.landingConflict(
+          snapshot,
+          replacementTarget !== undefined,
+        );
+        return (
+          conflict ??
+          staged.loadValidatedSnapshot(snapshot, {
+            replaceExisting: replacementTarget !== undefined,
+          })
+        );
       },
       (result) => ("code" in result ? undefined : result.workspace.id),
       snapshot.workspace.id,
       () =>
-        options.replaceExisting
-          ? { kind: "replace", target: options.replacementTarget! }
+        replacementTarget
+          ? { kind: "replace", target: replacementTarget }
           : { kind: "create" },
       (error) => error,
     );

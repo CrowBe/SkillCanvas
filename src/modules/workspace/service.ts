@@ -7,7 +7,6 @@ import {
 import {
   instructionLoadVector,
   validateInstructionMap,
-  type InstructionLoadVector,
   type InstructionMap,
 } from "../instruction-map";
 import {
@@ -21,19 +20,15 @@ import {
   type ToolContract,
 } from "../evaluations";
 import {
-  byteLength,
   DomainMutationError,
   err,
-  normalizeReferencePath,
+  isJsonObject,
   ok,
-  REFERENCE_MAX_BYTES,
-  REFERENCES_MAX,
   RULESET_VERSION,
-  SNAPSHOT_MAX_BYTES,
   type DomainError,
   type Result,
 } from "../shared";
-import { EMPTY_SKILL, parseSkillMd } from "../skill";
+import { EMPTY_SKILL, parseSkillMd, validateSkillInput } from "../skill";
 import type {
   ArtifactRecord,
   AuditEvent,
@@ -42,14 +37,21 @@ import type {
   WorkspaceBundle,
   WorkspaceRecord,
   WorkspaceReplacementTarget,
-  WorkspaceSnapshot,
   WorkspaceStore,
 } from "./types";
 import {
+  admitSnapshot,
   PortableSnapshotSizeError,
   portableSnapshotJson,
-  portableSnapshotSizeError,
-} from "./snapshot-budget";
+} from "./snapshot-admission";
+import {
+  canonicalArtifactId,
+  type ArtifactDataByKind,
+  type ArtifactKind,
+  type CompareArtifact,
+} from "./artifacts";
+
+export type { CompareArtifact } from "./artifacts";
 
 export interface WorkspaceService {
   create(input?: {
@@ -121,29 +123,6 @@ export interface WorkspaceService {
   ): Promise<Result<WorkspaceBundle>>;
 }
 
-export type CompareArtifact = {
-  readonly kind: "compare";
-  readonly beforeRevision: number;
-  readonly afterRevision: number;
-  readonly source: {
-    readonly additions: number;
-    readonly deletions: number;
-    readonly changedLines: readonly number[];
-    readonly approximate: boolean;
-  };
-  readonly lint: {
-    readonly before: Pick<LintArtifact, "score" | "grade" | "counts">;
-    readonly after: Pick<LintArtifact, "score" | "grade" | "counts">;
-  };
-  readonly evaluationReferences: readonly {
-    readonly id: string;
-    readonly kind: EvaluationKind;
-    readonly revision: number;
-    readonly status: EvaluationRecord["status"];
-    readonly updatedAt: string;
-  }[];
-};
-
 export function createWorkspaceService(
   store: WorkspaceStore,
 ): WorkspaceService {
@@ -157,7 +136,7 @@ export function createWorkspaceService(
       const skillMd = input.skillMd === undefined ? EMPTY_SKILL : input.skillMd;
       const referenceFiles =
         input.referenceFiles === undefined ? [] : input.referenceFiles;
-      const valid = validateInput(skillMd, referenceFiles);
+      const valid = validateSkillInput(skillMd, referenceFiles);
       if (!valid.ok) return valid;
       try {
         return ok(
@@ -178,7 +157,7 @@ export function createWorkspaceService(
     async update(input) {
       const referenceFiles =
         input.referenceFiles === undefined ? [] : input.referenceFiles;
-      const valid = validateInput(input.skillMd, referenceFiles);
+      const valid = validateSkillInput(input.skillMd, referenceFiles);
       if (!valid.ok) return valid;
       const result = await store.appendRevision({
         ...input,
@@ -362,7 +341,7 @@ export function createWorkspaceService(
           : evaluation.kind === "test-run"
             ? submitTestRun(
                 evaluation,
-                isSchemaObject(input) && "finalOutput" in input
+                isJsonObject(input) && "finalOutput" in input
                   ? input.finalOutput
                   : input,
               )
@@ -412,124 +391,44 @@ export function createWorkspaceService(
           );
     },
     async inspectSnapshotImport(json) {
-      const decoded = await decodeSnapshot(json);
-      if (!decoded.ok) return decoded;
+      const admitted = await admitSnapshot(json);
+      if (!admitted.ok) return admitted;
       const target = await store.getReplacementTarget(
-        decoded.value.workspace.id,
+        admitted.value.workspace.id,
       );
       const replacementTarget = "code" in target ? undefined : target;
       const existingWorkspace = replacementTarget?.workspace;
       return ok({
-        incomingWorkspace: decoded.value.workspace,
+        incomingWorkspace: admitted.value.workspace,
         ...(existingWorkspace ? { existingWorkspace } : {}),
         ...(replacementTarget ? { replacementTarget } : {}),
         collision: existingWorkspace !== undefined,
       });
     },
     async importSnapshot(json) {
-      const decoded = await decodeSnapshot(json);
-      if (!decoded.ok) return decoded;
-      return fromStore(await store.importSnapshot(decoded.value));
+      const admitted = await admitSnapshot(json);
+      if (!admitted.ok) return admitted;
+      return fromStore(await store.importSnapshot(admitted.value));
     },
     async replaceSnapshot(json, replacementTarget) {
-      const decoded = await decodeSnapshot(json);
-      if (!decoded.ok) return decoded;
+      const admitted = await admitSnapshot(json);
+      if (!admitted.ok) return admitted;
       return fromStore(
-        await store.importSnapshot(decoded.value, {
-          replaceExisting: true,
-          replacementTarget,
-        }),
+        await store.importSnapshot(admitted.value, replacementTarget),
       );
     },
   };
 }
 
-const SNAPSHOT_MAX_DEPTH = 64;
-const SNAPSHOT_MAX_NODES = 100_000;
-
-async function decodeSnapshot(
-  json: string,
-): Promise<Result<WorkspaceSnapshot>> {
-  if (byteLength(json) > SNAPSHOT_MAX_BYTES)
-    return err("size_limit", `Snapshot exceeds ${SNAPSHOT_MAX_BYTES} bytes.`);
-  let snapshot: WorkspaceSnapshot;
-  try {
-    snapshot = JSON.parse(json) as WorkspaceSnapshot;
-  } catch {
-    return err("invalid_snapshot", "Snapshot is not valid JSON.");
-  }
-  const complexityIssue = snapshotComplexityError(snapshot);
-  if (complexityIssue) return err("invalid_snapshot", complexityIssue);
-  const shape = await validateSnapshotShape(snapshot);
-  if (!shape.ok) return shape;
-  return ok(snapshot);
-}
-
-function snapshotComplexityError(value: unknown): string | null {
-  const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
-  let nodes = 0;
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (current.value === null || typeof current.value !== "object") continue;
-    nodes += 1;
-    if (nodes > SNAPSHOT_MAX_NODES)
-      return `Snapshot exceeds ${SNAPSHOT_MAX_NODES} structured values.`;
-    if (current.depth >= SNAPSHOT_MAX_DEPTH)
-      return `Snapshot nesting exceeds ${SNAPSHOT_MAX_DEPTH} levels.`;
-    for (const child of Object.values(current.value))
-      pending.push({ value: child, depth: current.depth + 1 });
-  }
-  return null;
-}
-
-function validateInput(
-  skillMd: unknown,
-  files: unknown,
-): Result<readonly { path: string; content: string }[]> {
-  if (typeof skillMd !== "string")
-    return err("invalid_submission", "SKILL.md content must be a string.");
-  if (!Array.isArray(files))
-    return err("invalid_submission", "Reference files must be an array.");
-  const parsed = parseSkillMd(skillMd);
-  if (!parsed.ok) return parsed;
-  if (files.length > REFERENCES_MAX)
-    return err(
-      "size_limit",
-      `A Skill may include at most ${REFERENCES_MAX} reference files.`,
-    );
-  const normalized: { path: string; content: string }[] = [];
-  const seen = new Set<string>();
-  for (const file of files) {
-    if (
-      !isSchemaObject(file) ||
-      typeof (file as Record<string, unknown>).path !== "string" ||
-      typeof (file as Record<string, unknown>).content !== "string"
-    )
-      return err(
-        "invalid_submission",
-        "Each reference file requires string path and content fields.",
-      );
-    const shaped = file as { path: string; content: string };
-    const path = normalizeReferencePath(shaped.path);
-    if (!path.ok) return path;
-    if (seen.has(path.value.toLowerCase()))
-      return err("duplicate_path", `Duplicate normalized path: ${path.value}`);
-    if (byteLength(shaped.content) > REFERENCE_MAX_BYTES)
-      return err("size_limit", `Reference file ${path.value} is too large.`);
-    seen.add(path.value.toLowerCase());
-    normalized.push({ path: path.value, content: shaped.content });
-  }
-  return ok(normalized);
-}
 function fromStore<T>(value: T | DomainError): Result<T> {
   return typeof value === "object" && value !== null && "code" in value
     ? { ok: false, error: value as DomainError }
     : ok(value as T);
 }
-function artifact(
+function artifact<K extends ArtifactKind>(
   bundle: WorkspaceBundle,
-  kind: ArtifactRecord["kind"],
-  data: unknown,
+  kind: K,
+  data: ArtifactDataByKind[K],
   createdAt = new Date().toISOString(),
   id = artifactId(bundle, kind),
 ): ArtifactRecord {
@@ -543,11 +442,12 @@ function artifact(
     data,
   };
 }
-function artifactId(
-  bundle: WorkspaceBundle,
-  kind: ArtifactRecord["kind"],
-): string {
-  return `${bundle.workspace.id}:${bundle.revision.revision}:${kind}`;
+function artifactId(bundle: WorkspaceBundle, kind: ArtifactKind): string {
+  return canonicalArtifactId(
+    bundle.workspace.id,
+    bundle.revision.revision,
+    kind,
+  );
 }
 function nextComparisonTimestamp(artifacts: readonly ArtifactRecord[]): string {
   const latest = artifacts
@@ -786,237 +686,6 @@ function uniqueLinePositions(lines: readonly string[]): Map<string, number> {
   for (const line of duplicates) positions.delete(line);
   return positions;
 }
-async function validateSnapshotShape(
-  value: unknown,
-): Promise<Result<WorkspaceSnapshot>> {
-  if (!value || typeof value !== "object")
-    return err("invalid_snapshot", "Snapshot must be an object.");
-  const snapshot = value as Partial<WorkspaceSnapshot>;
-  if (
-    snapshot.snapshotVersion !== 1 ||
-    !isCanonicalUtcTimestamp(snapshot.exportedAt) ||
-    workspaceRecordError(snapshot.workspace) !== null ||
-    !Array.isArray(snapshot.revisions) ||
-    !Array.isArray(snapshot.blobs) ||
-    !Array.isArray(snapshot.artifacts) ||
-    !Array.isArray(snapshot.evaluations) ||
-    !Array.isArray(snapshot.auditEvents)
-  )
-    return err("invalid_snapshot", "Snapshot shape or version is invalid.");
-  const workspace = snapshot.workspace as WorkspaceRecord;
-  const sizeIssue = portableSnapshotSizeError(snapshot as WorkspaceSnapshot);
-  if (sizeIssue) return { ok: false, error: sizeIssue };
-  if (
-    snapshot.revisions.length > 1000 ||
-    snapshot.blobs.length > 1025 ||
-    snapshot.artifacts.length > 5000 ||
-    snapshot.evaluations.length > 1000 ||
-    snapshot.auditEvents.length > 10000
-  )
-    return err(
-      "size_limit",
-      "Snapshot record count exceeds the workbench bounds.",
-    );
-  if (
-    snapshot.evaluations.length > 0 ||
-    snapshot.artifacts.some(
-      (artifact) => isSchemaObject(artifact) && artifact.kind === "compare",
-    )
-  )
-    return err(
-      "invalid_snapshot",
-      "Snapshot imports cannot admit evaluation or comparison evidence. Import Skill and reference content without that evidence, then regenerate evaluations and comparisons locally.",
-    );
-  const blobs = new Map<string, string>();
-  for (const blob of snapshot.blobs) {
-    if (
-      !blob ||
-      typeof blob !== "object" ||
-      typeof blob.hash !== "string" ||
-      typeof blob.content !== "string" ||
-      typeof blob.bytes !== "number" ||
-      !Number.isInteger(blob.bytes) ||
-      blob.bytes < 0 ||
-      byteLength(blob.content) !== blob.bytes ||
-      blobs.has(blob.hash)
-    )
-      return err(
-        "invalid_snapshot",
-        "Snapshot contains an invalid blob record.",
-      );
-    blobs.set(blob.hash, blob.content);
-  }
-  for (const revision of snapshot.revisions) {
-    if (revisionRecordError(revision))
-      return err(
-        "invalid_snapshot",
-        "Snapshot contains an invalid revision record.",
-      );
-    const skillMd = blobs.get(revision.contentHash);
-    if (skillMd === undefined)
-      return err(
-        "invalid_snapshot",
-        `Revision ${revision.revision} points to a missing Skill blob.`,
-      );
-    const references: { path: string; content: string }[] = [];
-    for (const reference of revision.references) {
-      const content = blobs.get(reference.contentHash);
-      if (content === undefined || byteLength(content) !== reference.bytes)
-        return err(
-          "invalid_snapshot",
-          `Revision ${revision.revision} has an invalid reference pointer.`,
-        );
-      references.push({ path: reference.path, content });
-    }
-    const validated = validateInput(skillMd, references);
-    if (!validated.ok)
-      return err(
-        "invalid_snapshot",
-        `Revision ${revision.revision} contains invalid Skill content: ${validated.error.message}`,
-      );
-    if (
-      references.some(
-        (reference, index) => reference.path !== validated.value[index]?.path,
-      )
-    )
-      return err(
-        "invalid_snapshot",
-        `Revision ${revision.revision} contains a noncanonical reference path.`,
-      );
-  }
-  const revisionsByNumber = new Map(
-    snapshot.revisions.map((revision) => [revision.revision, revision]),
-  );
-  for (const artifact of snapshot.artifacts) {
-    const issue = artifactRecordError(artifact);
-    if (issue)
-      return err(
-        "invalid_snapshot",
-        `Snapshot contains an invalid artifact record: ${issue}`,
-      );
-    if (
-      artifact.workspaceId !== workspace.id ||
-      !revisionsByNumber.has(artifact.revision)
-    )
-      return err(
-        "invalid_snapshot",
-        `Artifact ${artifact.id} is not linked to an imported revision.`,
-      );
-    if (!hasCanonicalArtifactId(artifact))
-      return err(
-        "invalid_snapshot",
-        `Artifact ${artifact.id} does not use its canonical id.`,
-      );
-    const artifactIssue = artifactDataError(
-      artifact.kind,
-      artifact.data,
-      blobs.get(revisionsByNumber.get(artifact.revision)!.contentHash)!,
-      artifact.revision,
-    );
-    if (artifactIssue)
-      return err(
-        "invalid_snapshot",
-        `Artifact ${artifact.id} has invalid data: ${artifactIssue}`,
-      );
-    const deterministicIssue = await deterministicArtifactError(
-      artifact,
-      revisionsByNumber,
-      blobs,
-    );
-    if (deterministicIssue)
-      return err(
-        "invalid_snapshot",
-        `Artifact ${artifact.id} does not match canonical analysis: ${deterministicIssue}`,
-      );
-  }
-  for (const revision of snapshot.revisions) {
-    const maps = snapshot.artifacts.filter(
-      (artifact) =>
-        artifact.revision === revision.revision &&
-        artifact.kind === "instruction-map",
-    );
-    const loads = snapshot.artifacts.filter(
-      (artifact) =>
-        artifact.revision === revision.revision &&
-        artifact.kind === "instruction-load",
-    );
-    if (maps.length > 1 || loads.length > 1)
-      return err(
-        "invalid_snapshot",
-        `Revision ${revision.revision} contains duplicate instruction artifacts.`,
-      );
-    const map = maps[0]?.data as InstructionMap | undefined;
-    if (map?.status !== "accepted") {
-      if (loads.length > 0)
-        return err(
-          "invalid_snapshot",
-          `Revision ${revision.revision} contains instruction-load metrics without an accepted map.`,
-        );
-      continue;
-    }
-    if (loads.length !== 1)
-      return err(
-        "invalid_snapshot",
-        `Revision ${revision.revision} is missing instruction-load metrics for its accepted map.`,
-      );
-    const expected = instructionLoadVector(map);
-    const received = loads[0].data as Record<string, unknown>;
-    if (
-      Object.entries(expected).some(([key, value]) => received[key] !== value)
-    )
-      return err(
-        "invalid_snapshot",
-        `Revision ${revision.revision} contains instruction-load metrics that do not match its accepted map.`,
-      );
-  }
-  for (const event of snapshot.auditEvents) {
-    const issue = auditEventError(event);
-    if (issue)
-      return err(
-        "invalid_snapshot",
-        `Snapshot contains an invalid audit event: ${issue}`,
-      );
-    if (
-      event.workspaceId !== workspace.id ||
-      (event.revision !== undefined && !revisionsByNumber.has(event.revision))
-    )
-      return err(
-        "invalid_snapshot",
-        `Audit event ${event.id} is not linked to an imported revision.`,
-      );
-  }
-  return ok(snapshot as WorkspaceSnapshot);
-}
-
-async function deterministicArtifactError(
-  artifact: ArtifactRecord,
-  revisionsByNumber: ReadonlyMap<
-    number,
-    WorkspaceSnapshot["revisions"][number]
-  >,
-  blobs: ReadonlyMap<string, string>,
-): Promise<string | null> {
-  if (
-    artifact.kind === "instruction-map" ||
-    artifact.kind === "instruction-load"
-  )
-    return null;
-  if (artifact.version !== RULESET_VERSION) return "ruleset version differs";
-  const revision = revisionsByNumber.get(artifact.revision)!;
-  const skillMd = blobs.get(revision.contentHash)!;
-  let expected: unknown;
-  if (artifact.kind === "lint")
-    expected = analyzeLint(
-      skillMd,
-      revision.references.map((reference) => reference.path),
-    );
-  else if (artifact.kind === "structure") expected = analyzeStructure(skillMd);
-  else return "comparison evidence cannot be imported";
-  return sameJsonValue(artifact.data, expected)
-    ? null
-    : "artifact data differs";
-}
-
 function evaluationReference(
   evaluation: EvaluationRecord,
 ): CompareArtifact["evaluationReferences"][number] {
@@ -1032,33 +701,8 @@ function snapshotMutationFailure(error: unknown): Result<never> {
   throw error;
 }
 
-function sameJsonValue(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) return true;
-  if (Array.isArray(left) || Array.isArray(right))
-    return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
-      left.length === right.length &&
-      left.every((value, index) => sameJsonValue(value, right[index]))
-    );
-  if (!isSchemaObject(left) || !isSchemaObject(right)) return false;
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  return (
-    leftKeys.length === rightKeys.length &&
-    leftKeys.every(
-      (key, index) =>
-        key === rightKeys[index] && sameJsonValue(left[key], right[key]),
-    )
-  );
-}
-
-function isSchemaObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function toolContractError(contract: unknown): string | null {
-  if (!isSchemaObject(contract)) return "The Tool contract must be an object.";
+  if (!isJsonObject(contract)) return "The Tool contract must be an object.";
   const candidate = contract as Record<string, unknown>;
   if (typeof candidate.name !== "string" || candidate.name.trim() === "")
     return "The Tool contract requires a name.";
@@ -1067,243 +711,12 @@ function toolContractError(contract: unknown): string | null {
     typeof candidate.description !== "string"
   )
     return "The Tool contract description must be a string.";
-  if (!isSchemaObject(candidate.inputSchema))
+  if (!isJsonObject(candidate.inputSchema))
     return "The Tool contract requires an inputSchema object.";
-  if (!isSchemaObject(candidate.outputSchema))
+  if (!isJsonObject(candidate.outputSchema))
     return "The Tool contract requires an outputSchema object.";
   return (
     schemaSubsetError(candidate.inputSchema, "inputSchema") ??
     schemaSubsetError(candidate.outputSchema, "outputSchema")
-  );
-}
-
-function hasCanonicalArtifactId(artifact: ArtifactRecord): boolean {
-  const base = `${artifact.workspaceId}:${artifact.revision}:${artifact.kind}`;
-  if (artifact.kind !== "compare") return artifact.id === base;
-  if (!artifact.id.startsWith(`${base}:`)) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    artifact.id.slice(base.length + 1),
-  );
-}
-
-function workspaceRecordError(value: unknown): string | null {
-  if (!isSchemaObject(value)) return "workspace must be an object.";
-  if (
-    !hasCanonicalPrefixedId(value.id, "workspace") ||
-    typeof value.name !== "string" ||
-    !Number.isInteger(value.currentRevision) ||
-    !isCanonicalUtcTimestamp(value.createdAt) ||
-    !isCanonicalUtcTimestamp(value.updatedAt) ||
-    typeof value.ephemeral !== "boolean"
-  )
-    return "workspace metadata is incomplete.";
-  return null;
-}
-
-function revisionRecordError(value: unknown): string | null {
-  if (!isSchemaObject(value)) return "revision must be an object.";
-  if (
-    typeof value.workspaceId !== "string" ||
-    !Number.isInteger(value.revision) ||
-    (value.parentRevision !== null &&
-      !Number.isInteger(value.parentRevision)) ||
-    typeof value.contentHash !== "string" ||
-    !Array.isArray(value.references) ||
-    !isCanonicalUtcTimestamp(value.timestamp) ||
-    typeof value.rulesetVersion !== "string"
-  )
-    return "revision metadata is incomplete.";
-  for (const reference of value.references)
-    if (
-      !isSchemaObject(reference) ||
-      typeof reference.path !== "string" ||
-      typeof reference.contentHash !== "string" ||
-      typeof reference.bytes !== "number" ||
-      !Number.isInteger(reference.bytes) ||
-      reference.bytes < 0
-    )
-      return "revision reference metadata is incomplete.";
-  return null;
-}
-
-function sourceSpanError(value: unknown): string | null {
-  if (
-    !isSchemaObject(value) ||
-    !Number.isInteger(value.start) ||
-    !Number.isInteger(value.end) ||
-    (value.start as number) < 0 ||
-    (value.end as number) <= (value.start as number)
-  )
-    return "source span is invalid.";
-  return null;
-}
-
-function lintSummaryError(value: unknown): string | null {
-  if (!isSchemaObject(value)) return "lint summary is invalid.";
-  const counts = value.counts;
-  if (
-    typeof value.score !== "number" ||
-    !["A", "B", "C", "D"].includes(value.grade as string) ||
-    !isSchemaObject(counts) ||
-    !["error", "warn", "info"].every(
-      (severity) => typeof counts[severity] === "number",
-    )
-  )
-    return "lint summary is invalid.";
-  return null;
-}
-
-function artifactDataError(
-  kind: ArtifactRecord["kind"],
-  data: unknown,
-  skillMd: string,
-  revision: number,
-): string | null {
-  if (!isSchemaObject(data)) return "artifact data must be an object.";
-  if (kind === "instruction-map") {
-    if (data.suppliedBy !== "visiting-agent proposal")
-      return "instruction map has an invalid supplier.";
-    const checked = validateInstructionMap(data, skillMd, revision);
-    return checked.ok ? null : checked.error.message;
-  }
-  if (kind === "instruction-load") {
-    const keys: readonly (keyof InstructionLoadVector)[] = [
-      "totalAtomicRequirements",
-      "maximumSimultaneouslyActive",
-      "longestDependencyChain",
-      "maximumScopeDepth",
-      "branchCount",
-      "crossScopeReferences",
-      "conflicts",
-      "duplicates",
-      "deterministicallyVerifiableFraction",
-    ];
-    return keys.every(
-      (key) => typeof data[key] === "number" && Number.isFinite(data[key]),
-    )
-      ? null
-      : "instruction-load metrics must be numeric.";
-  }
-  if (kind === "lint") {
-    if (
-      data.kind !== "lint" ||
-      typeof data.rulesetVersion !== "string" ||
-      lintSummaryError(data) !== null ||
-      !Array.isArray(data.findings)
-    )
-      return "lint artifact fields are incomplete.";
-    for (const finding of data.findings)
-      if (
-        !isSchemaObject(finding) ||
-        typeof finding.rule !== "string" ||
-        !["error", "warn", "info"].includes(finding.severity as string) ||
-        typeof finding.message !== "string" ||
-        (finding.sourceSpan !== undefined &&
-          sourceSpanError(finding.sourceSpan) !== null)
-      )
-        return "lint finding is invalid.";
-    return null;
-  }
-  if (kind === "structure") {
-    if (
-      data.kind !== "structure" ||
-      typeof data.rulesetVersion !== "string" ||
-      typeof data.title !== "string" ||
-      typeof data.description !== "string" ||
-      !Array.isArray(data.sections)
-    )
-      return "structure artifact fields are incomplete.";
-    for (const section of data.sections)
-      if (
-        !isSchemaObject(section) ||
-        !Number.isInteger(section.level) ||
-        typeof section.title !== "string" ||
-        sourceSpanError(section.sourceSpan) !== null
-      )
-        return "structure section is invalid.";
-    return null;
-  }
-  if (
-    data.kind !== "compare" ||
-    !Number.isInteger(data.beforeRevision) ||
-    !Number.isInteger(data.afterRevision) ||
-    !isSchemaObject(data.source) ||
-    typeof data.source.additions !== "number" ||
-    typeof data.source.deletions !== "number" ||
-    !Array.isArray(data.source.changedLines) ||
-    data.source.changedLines.some((line) => !Number.isInteger(line)) ||
-    typeof data.source.approximate !== "boolean" ||
-    !isSchemaObject(data.lint) ||
-    lintSummaryError(data.lint.before) !== null ||
-    lintSummaryError(data.lint.after) !== null ||
-    !Array.isArray(data.evaluationReferences)
-  )
-    return "compare artifact fields are incomplete.";
-  for (const reference of data.evaluationReferences)
-    if (
-      !isSchemaObject(reference) ||
-      typeof reference.id !== "string" ||
-      !["triggering", "test-run", "capacity-probe"].includes(
-        reference.kind as string,
-      ) ||
-      !Number.isInteger(reference.revision) ||
-      !["prepared", "in-progress", "complete"].includes(
-        reference.status as string,
-      ) ||
-      !isCanonicalUtcTimestamp(reference.updatedAt)
-    )
-      return "compare evaluation reference is invalid.";
-  return null;
-}
-
-function artifactRecordError(value: unknown): string | null {
-  if (!isSchemaObject(value)) return "record must be an object.";
-  if (
-    typeof value.id !== "string" ||
-    typeof value.workspaceId !== "string" ||
-    !Number.isInteger(value.revision) ||
-    ![
-      "lint",
-      "structure",
-      "instruction-map",
-      "instruction-load",
-      "compare",
-    ].includes(value.kind as string) ||
-    typeof value.version !== "string" ||
-    !isCanonicalUtcTimestamp(value.createdAt) ||
-    !("data" in value)
-  )
-    return "required metadata is missing.";
-  return null;
-}
-
-function auditEventError(value: unknown): string | null {
-  if (!isSchemaObject(value)) return "record must be an object.";
-  if (
-    !hasCanonicalPrefixedId(value.id, "audit") ||
-    !hasCanonicalPrefixedId(value.workspaceId, "workspace") ||
-    !isCanonicalUtcTimestamp(value.at) ||
-    !["human", "webmcp", "system"].includes(value.actor as string) ||
-    typeof value.action !== "string" ||
-    (value.revision !== undefined && !Number.isInteger(value.revision)) ||
-    (value.details !== undefined && !isSchemaObject(value.details))
-  )
-    return "required metadata is missing.";
-  return null;
-}
-
-function isCanonicalUtcTimestamp(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const instant = new Date(value);
-  return !Number.isNaN(instant.getTime()) && instant.toISOString() === value;
-}
-
-function hasCanonicalPrefixedId(value: unknown, prefix: string): boolean {
-  return (
-    typeof value === "string" &&
-    new RegExp(
-      `^${prefix}_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
-      "i",
-    ).test(value)
   );
 }

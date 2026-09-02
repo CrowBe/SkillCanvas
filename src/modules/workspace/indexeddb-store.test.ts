@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IDBPDatabase } from "idb";
 import { EMPTY_SKILL } from "../skill";
+import type { WorkspaceSnapshot } from "./types";
 import { byteLength, sha256 } from "../shared";
 import { IndexedDbWorkspaceStore } from "./indexeddb-store";
 import { MemoryWorkspaceStore } from "./memory-store";
 import { createWorkspaceService } from "./service";
+import {
+  admitSnapshot,
+  portableSnapshotJson,
+  type AdmittedSnapshot,
+} from "./snapshot-admission";
 
 function databaseControl() {
   let failWrites = false;
@@ -183,10 +189,10 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       actor: "human",
     });
     if ("code" in updated) throw new Error(updated.message);
-    const restored = await store.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: await replacementTarget(store, updated.workspace.id),
-    });
+    const restored = await store.importSnapshot(
+      await admitted(snapshot),
+      await replacementTarget(store, updated.workspace.id),
+    );
     if ("code" in restored) throw new Error(restored.message);
     expect(restored.revision.revision).toBe(1);
     expect("code" in (await store.openWorkspace(created.workspace.id, 2))).toBe(
@@ -214,10 +220,10 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     if ("code" in updated) throw new Error(updated.message);
     control.failNextWrites();
     await expect(
-      store.importSnapshot(snapshot, {
-        replaceExisting: true,
-        replacementTarget: await replacementTarget(store, updated.workspace.id),
-      }),
+      store.importSnapshot(
+        await admitted(snapshot),
+        await replacementTarget(store, updated.workspace.id),
+      ),
     ).rejects.toThrow("persistence failed");
     const unchanged = await store.openWorkspace(created.workspace.id);
     expect("code" in unchanged ? undefined : unchanged.revision.revision).toBe(
@@ -246,9 +252,13 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     (secondSnapshot.auditEvents[0] as { id: string }).id =
       firstSnapshot.auditEvents[0]!.id;
 
+    const [firstAdmitted, secondAdmitted] = await Promise.all([
+      admitted(firstSnapshot),
+      admitted(secondSnapshot),
+    ]);
     const results = await Promise.all([
-      store.importSnapshot(firstSnapshot),
-      store.importSnapshot(secondSnapshot),
+      store.importSnapshot(firstAdmitted),
+      store.importSnapshot(secondAdmitted),
     ]);
     expect(results.filter((result) => !("code" in result))).toHaveLength(1);
     expect(
@@ -277,10 +287,10 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     if ("code" in updated) throw new Error(updated.message);
     control.referenceBlobFromOtherWorkspace(updated.revision.contentHash);
 
-    const restored = await store.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: await replacementTarget(store, updated.workspace.id),
-    });
+    const restored = await store.importSnapshot(
+      await admitted(snapshot),
+      await replacementTarget(store, updated.workspace.id),
+    );
     if ("code" in restored) throw new Error(restored.message);
     expect(control.deletedBlobs).not.toContain(updated.revision.contentHash);
   });
@@ -335,13 +345,10 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     };
     (snapshot.revisions[0] as { contentHash: string }).contentHash =
       replacementHash;
-    const replaced = await replacing.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: await replacementTarget(
-        replacing,
-        created.workspace.id,
-      ),
-    });
+    const replaced = await replacing.importSnapshot(
+      await admitted(snapshot),
+      await replacementTarget(replacing, created.workspace.id),
+    );
     if ("code" in replaced) throw new Error(replaced.message);
 
     const rejected = await stale.appendRevision({
@@ -371,13 +378,10 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     const snapshot = await replacing.exportSnapshot(created.workspace.id);
     if ("code" in snapshot) throw new Error(snapshot.message);
     (snapshot.workspace as { name: string }).name = "Replacement name";
-    const replaced = await replacing.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: await replacementTarget(
-        replacing,
-        created.workspace.id,
-      ),
-    });
+    const replaced = await replacing.importSnapshot(
+      await admitted(snapshot),
+      await replacementTarget(replacing, created.workspace.id),
+    );
     if ("code" in replaced) throw new Error(replaced.message);
 
     const rejected = await stale.appendRevision({
@@ -413,10 +417,10 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       skillMd: `${EMPTY_SKILL}\nNew persisted revision.`,
       actor: "human",
     });
-    const rejected = await stale.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: confirmed,
-    });
+    const rejected = await stale.importSnapshot(
+      await admitted(snapshot),
+      confirmed,
+    );
     expect("code" in rejected && rejected.code).toBe("revision_conflict");
     const current = await stale.openWorkspace(created.workspace.id);
     expect("code" in current ? undefined : current.revision.revision).toBe(2);
@@ -432,21 +436,50 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     });
     const second = new IndexedDbWorkspaceStore(control.database);
     await second.openWorkspace(created.workspace.id);
-    await first.putArtifact(
-      {
-        id: "artifact-first",
+    await first.updateArtifacts({
+      workspaceId: created.workspace.id,
+      revision: 1,
+      expectedContentHash: created.revision.contentHash,
+      expectedGeneration: created.evidenceGeneration,
+      artifacts: [
+        {
+          id: "artifact-first",
+          workspaceId: created.workspace.id,
+          revision: 1,
+          kind: "lint",
+          version: "1",
+          createdAt: new Date().toISOString(),
+          data: {},
+        },
+      ],
+    });
+    await expect(
+      second.updateArtifacts({
         workspaceId: created.workspace.id,
         revision: 1,
-        kind: "lint",
-        version: "1",
-        createdAt: new Date().toISOString(),
-        data: {},
-      },
-      created.revision.contentHash,
-      created.evidenceGeneration,
-    );
-    await expect(
-      second.putArtifact(
+        expectedContentHash: created.revision.contentHash,
+        expectedGeneration: created.evidenceGeneration,
+        artifacts: [
+          {
+            id: "artifact-second",
+            workspaceId: created.workspace.id,
+            revision: 1,
+            kind: "structure",
+            version: "1",
+            createdAt: new Date().toISOString(),
+            data: {},
+          },
+        ],
+      }),
+    ).rejects.toThrow("Workspace evidence changed");
+    const refreshed = await second.openWorkspace(created.workspace.id);
+    if ("code" in refreshed) throw new Error(refreshed.message);
+    await second.updateArtifacts({
+      workspaceId: created.workspace.id,
+      revision: 1,
+      expectedContentHash: created.revision.contentHash,
+      expectedGeneration: refreshed.evidenceGeneration,
+      artifacts: [
         {
           id: "artifact-second",
           workspaceId: created.workspace.id,
@@ -456,25 +489,8 @@ describe("IndexedDbWorkspaceStore transactions", () => {
           createdAt: new Date().toISOString(),
           data: {},
         },
-        created.revision.contentHash,
-        created.evidenceGeneration,
-      ),
-    ).rejects.toThrow("Workspace evidence changed");
-    const refreshed = await second.openWorkspace(created.workspace.id);
-    if ("code" in refreshed) throw new Error(refreshed.message);
-    await second.putArtifact(
-      {
-        id: "artifact-second",
-        workspaceId: created.workspace.id,
-        revision: 1,
-        kind: "structure",
-        version: "1",
-        createdAt: new Date().toISOString(),
-        data: {},
-      },
-      created.revision.contentHash,
-      refreshed.evidenceGeneration,
-    );
+      ],
+    });
     const reader = new IndexedDbWorkspaceStore(control.database);
     const current = await reader.openWorkspace(created.workspace.id);
     expect(
@@ -496,23 +512,27 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     if ("code" in snapshot) throw new Error(snapshot.message);
     const confirmed = await replacementTarget(first, created.workspace.id);
     const second = new IndexedDbWorkspaceStore(control.database);
-    await second.putArtifact(
-      {
-        id: "new-evidence",
-        workspaceId: created.workspace.id,
-        revision: 1,
-        kind: "lint",
-        version: "1",
-        createdAt: new Date().toISOString(),
-        data: {},
-      },
-      created.revision.contentHash,
-      confirmed.generation,
-    );
-    const rejected = await first.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: confirmed,
+    await second.updateArtifacts({
+      workspaceId: created.workspace.id,
+      revision: 1,
+      expectedContentHash: created.revision.contentHash,
+      expectedGeneration: confirmed.generation,
+      artifacts: [
+        {
+          id: "new-evidence",
+          workspaceId: created.workspace.id,
+          revision: 1,
+          kind: "lint",
+          version: "1",
+          createdAt: new Date().toISOString(),
+          data: {},
+        },
+      ],
     });
+    const rejected = await first.importSnapshot(
+      await admitted(snapshot),
+      confirmed,
+    );
     expect("code" in rejected && rejected.code).toBe("revision_conflict");
     const reader = new IndexedDbWorkspaceStore(control.database);
     const current = await reader.openWorkspace(created.workspace.id);
@@ -530,36 +550,44 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       referenceFiles: [],
     });
     control.clearReadLog();
-    await store.putArtifact(
-      {
-        id: "targeted-artifact",
-        workspaceId: created.workspace.id,
-        revision: 1,
-        kind: "lint",
-        version: "1",
-        createdAt: new Date().toISOString(),
-        data: {},
-      },
-      created.revision.contentHash,
-      created.evidenceGeneration,
-    );
+    await store.updateArtifacts({
+      workspaceId: created.workspace.id,
+      revision: 1,
+      expectedContentHash: created.revision.contentHash,
+      expectedGeneration: created.evidenceGeneration,
+      artifacts: [
+        {
+          id: "targeted-artifact",
+          workspaceId: created.workspace.id,
+          revision: 1,
+          kind: "lint",
+          version: "1",
+          createdAt: new Date().toISOString(),
+          data: {},
+        },
+      ],
+    });
     expect(control.transactionGetAlls).not.toContain("blobs");
     expect(control.databaseGetAlls).toEqual([]);
     control.clearReadLog();
     const target = await replacementTarget(store, created.workspace.id);
-    await store.putArtifact(
-      {
-        id: "second-targeted-artifact",
-        workspaceId: created.workspace.id,
-        revision: 1,
-        kind: "structure",
-        version: "1",
-        createdAt: new Date().toISOString(),
-        data: {},
-      },
-      created.revision.contentHash,
-      target.generation,
-    );
+    await store.updateArtifacts({
+      workspaceId: created.workspace.id,
+      revision: 1,
+      expectedContentHash: created.revision.contentHash,
+      expectedGeneration: target.generation,
+      artifacts: [
+        {
+          id: "second-targeted-artifact",
+          workspaceId: created.workspace.id,
+          revision: 1,
+          kind: "structure",
+          version: "1",
+          createdAt: new Date().toISOString(),
+          data: {},
+        },
+      ],
+    });
     expect(control.databaseGetAlls).toEqual([]);
     expect(control.transactionGetAlls).not.toContain("blobs");
   });
@@ -750,28 +778,29 @@ describe("IndexedDbWorkspaceStore transactions", () => {
     (snapshot.revisions[0] as { contentHash: string }).contentHash =
       replacementHash;
     const replacing = new IndexedDbWorkspaceStore(control.database);
-    const replaced = await replacing.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: await replacementTarget(
-        replacing,
-        created.workspace.id,
-      ),
-    });
+    const replaced = await replacing.importSnapshot(
+      await admitted(snapshot),
+      await replacementTarget(replacing, created.workspace.id),
+    );
     if ("code" in replaced) throw new Error(replaced.message);
     await expect(
-      stale.putArtifact(
-        {
-          id: "stale-lint",
-          workspaceId: created.workspace.id,
-          revision: 1,
-          kind: "lint",
-          version: "1",
-          createdAt: new Date().toISOString(),
-          data: {},
-        },
-        created.revision.contentHash,
-        created.evidenceGeneration,
-      ),
+      stale.updateArtifacts({
+        workspaceId: created.workspace.id,
+        revision: 1,
+        expectedContentHash: created.revision.contentHash,
+        expectedGeneration: created.evidenceGeneration,
+        artifacts: [
+          {
+            id: "stale-lint",
+            workspaceId: created.workspace.id,
+            revision: 1,
+            kind: "lint",
+            version: "1",
+            createdAt: new Date().toISOString(),
+            data: {},
+          },
+        ],
+      }),
     ).rejects.toThrow(/Evidence revision changed|Workspace evidence changed/);
     const reader = new IndexedDbWorkspaceStore(control.database);
     const current = await reader.openWorkspace(created.workspace.id);
@@ -798,13 +827,10 @@ describe("IndexedDbWorkspaceStore transactions", () => {
       (blob: any) => blob.hash === snapshot.revisions[0].contentHash,
     );
     const replacing = new IndexedDbWorkspaceStore(control.database);
-    const replaced = await replacing.importSnapshot(snapshot, {
-      replaceExisting: true,
-      replacementTarget: await replacementTarget(
-        replacing,
-        created.value.workspace.id,
-      ),
-    });
+    const replaced = await replacing.importSnapshot(
+      await admitted(snapshot),
+      await replacementTarget(replacing, created.value.workspace.id),
+    );
     if ("code" in replaced) throw new Error(replaced.message);
     const rejected = await staleService.analyze(created.value.workspace.id, [
       "lint",
@@ -823,4 +849,12 @@ async function replacementTarget(
   const target = await store.getReplacementTarget(workspaceId);
   if ("code" in target) throw new Error(target.message);
   return target;
+}
+
+async function admitted(
+  snapshot: WorkspaceSnapshot,
+): Promise<AdmittedSnapshot> {
+  const result = await admitSnapshot(portableSnapshotJson(snapshot));
+  if (!result.ok) throw new Error(result.error.message);
+  return result.value;
 }

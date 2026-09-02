@@ -6,6 +6,7 @@ import {
   type ToolEnvelope,
 } from "./shared";
 import { validateSchema, type ToolContract } from "./evaluations";
+import { evaluationView } from "./workspace/view";
 import type { EvaluationRecord, WorkspaceBundle } from "./workspace/types";
 import type { WorkspaceService } from "./workspace/service";
 
@@ -288,19 +289,19 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
           },
         );
         if (result.ok) await refresh(bundle.value.workspace.id);
-        if (
-          result.ok &&
-          result.value.kind === "test-run" &&
-          runtime.registerMockForRun
-        ) {
+        const prepared = result.ok ? evaluationView(result.value) : null;
+        if (prepared?.kind === "test-run" && runtime.registerMockForRun) {
           try {
             const mockToolName = await runtime.registerMockForRun(
               bundle.value.workspace.id,
-              result.value.id,
-              (result.value.data as any).contract.name,
+              prepared.record.id,
+              prepared.data.contract.name,
             );
             return bundleEnvelope(
-              { ok: true, value: { evaluation: result.value, mockToolName } },
+              {
+                ok: true,
+                value: { evaluation: prepared.record, mockToolName },
+              },
               bundle.value,
             );
           } catch {
@@ -308,7 +309,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
               {
                 ok: true,
                 value: {
-                  evaluation: result.value,
+                  evaluation: prepared.record,
                   mockToolName: null,
                   manualFallback: true,
                 },
@@ -541,31 +542,30 @@ export async function registerWebMcpTools(
                 evaluationId,
                 input,
               );
-              if (result.ok) {
-                const refreshed = await runtime.service.open(workspaceId);
-                if (refreshed.ok) runtime.onWorkspaceChange?.(refreshed.value);
-              }
-              return result.ok
-                ? {
-                    protocolVersion: PROTOCOL_VERSION,
-                    ok: true,
-                    workspaceId,
-                    revision: result.value.evaluation.revision,
-                    contentHash: result.value.evaluation.contentHash,
-                    data: {
-                      output: result.value.output,
-                      transcript: (result.value.evaluation.data as any)
-                        .transcript,
-                    },
-                  }
-                : {
-                    protocolVersion: PROTOCOL_VERSION,
-                    ok: false,
-                    workspaceId,
-                    revision: null,
-                    contentHash: null,
-                    error: result.error,
-                  };
+              if (!result.ok)
+                return {
+                  protocolVersion: PROTOCOL_VERSION,
+                  ok: false,
+                  workspaceId,
+                  revision: null,
+                  contentHash: null,
+                  error: result.error,
+                };
+              const refreshed = await runtime.service.open(workspaceId);
+              if (refreshed.ok) runtime.onWorkspaceChange?.(refreshed.value);
+              const invoked = evaluationView(result.value.evaluation);
+              return {
+                protocolVersion: PROTOCOL_VERSION,
+                ok: true,
+                workspaceId,
+                revision: result.value.evaluation.revision,
+                contentHash: result.value.evaluation.contentHash,
+                data: {
+                  output: result.value.output,
+                  transcript:
+                    invoked?.kind === "test-run" ? invoked.data.transcript : [],
+                },
+              };
             },
           },
           runtime.selection,

@@ -28,8 +28,13 @@ test("fallback completes load, lint, revise, compare, and export without WebMCP"
   await page.getByRole("button", { name: "Compare", exact: true }).click();
   await expect(page.getByText("Source diff metadata")).toBeVisible();
   const download = page.waitForEvent("download");
-  await page.getByTestId("export-skill").click();
-  expect((await download).suggestedFilename()).toBe("Skill Canvas demo.zip");
+  await page.getByTestId("export-snapshot").click();
+  expect((await download).suggestedFilename()).toBe(
+    "Skill Canvas demo.workbench.json",
+  );
+  await expect(
+    page.getByText(/Evidence-free workbench snapshot/),
+  ).toBeVisible();
 });
 
 for (const theme of ["Light", "Dark", "Tuxedo", "Cardigan", "Terminal"]) {
