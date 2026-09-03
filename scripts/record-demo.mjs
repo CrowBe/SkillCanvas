@@ -228,7 +228,8 @@ await executeTool(page, "appearance_set", {
   choice: "terminal",
   agentRationale: "The Skill targets a terminal workflow; Terminal suits it.",
 });
-await beat(page, 3000);
+// Hold long enough that the collaboration badge reads on video.
+await beat(page, 5000);
 // Hand the workspace back: a human override clears the agent's note.
 await executeTool(page, "appearance_set", { choice: "light" });
 await beat(page, 1500);
