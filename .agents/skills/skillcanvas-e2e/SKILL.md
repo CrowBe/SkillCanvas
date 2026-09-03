@@ -123,9 +123,25 @@ selectedChoiceId, rationale}` per case; each envelope returns the next case.
 ## Verification
 
 - `WEBMCP_EVAL=1 npx playwright test tests/browser/webmcp-evals.spec.ts
---project=webmcp` → 8 passed.
+  --project=webmcp` → 8 passed.
 - `npx playwright test --project=chromium` → evals skipped, rest passed.
 - `npm run typecheck && npm run lint && npm run format:check && npm test` →
   all clean (one pre-existing `App.tsx` exhaustive-deps warning is known).
 - Traces from failing runs land in `test-results/webmcp-evals-*` and can be
   inspected with `npx playwright show-trace <path>`.
+
+## Demo Recording (submission video)
+
+The same tool flow doubles as the hackathon demo video recorder:
+`node scripts/record-demo.mjs` from the repository root records the deployed
+workbench (override with `DEMO_ORIGIN`) performing the full loop — load
+example, agent-authored skill, analyze, instruction-map proposal, triggering
+battery, mock test run with deterministic checks, revise, compare, re-analyze,
+evidence-free export — at presentation pacing with on-screen panel switches.
+Playwright's built-in `recordVideo` captures the browser content itself, so it
+works on Wayland where desktop screen capture is portal-gated (GNOME's
+Screenshot D-Bus API denies non-interactive callers and no
+`gpu-screen-recorder`/`wf-recorder` is installed). Output:
+`demo-output/skill-canvas-demo.webm` (~35-40 s at 1280x800; gitignored).
+Add narration and music externally; the rules require a public YouTube video
+under three minutes with audio.
