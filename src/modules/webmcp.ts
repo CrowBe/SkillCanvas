@@ -453,7 +453,8 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
     {
       name: "appearance_set",
       title: "Set Appearance",
-      description: "Sets the visible browser appearance preference.",
+      description:
+        'Sets the visible browser appearance preference. Optionally pass a short rationale for the choice — it is shown in the UI as a visible collaboration note ("your agent set this theme because …"). Appearance is a browser preference only: it never changes Skill content, revisions, hashes, evidence, or snapshots.',
       inputSchema: {
         type: "object",
         required: ["choice"],
@@ -462,6 +463,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
             type: "string",
             enum: ["system", "light", "dark", "tuxedo", "cardigan", "terminal"],
           },
+          agentRationale: { type: "string", maxLength: 280 },
         },
       },
       execute: async (input) => {
@@ -474,6 +476,12 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
             contentHash: null,
             data: runtime.appearance.setChoice(
               input.choice as AppearanceChoice,
+              {
+                agentRationale:
+                  typeof input.agentRationale === "string"
+                    ? input.agentRationale
+                    : undefined,
+              },
             ),
           };
         } catch (error) {

@@ -487,12 +487,36 @@ test("appearance: read and set, excluded from workspace revisioning", async ({
     ]),
   );
 
-  const set = await executeTool(page, "appearance_set", { choice: "terminal" });
+  const set = await executeTool(page, "appearance_set", {
+    choice: "terminal",
+    agentRationale: "The Skill targets a terminal workflow; Terminal suits it.",
+  });
   expect(set.ok).toBe(true);
   expect(set.data.storedChoice).toBe("terminal");
+  expect(set.data.agentRationale).toBe(
+    "The Skill targets a terminal workflow; Terminal suits it.",
+  );
   await expect(page.locator("html")).toHaveAttribute("data-theme", "terminal");
-  // Restore so later visual checks are unaffected.
+  // The collaboration note is visible in the UI.
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() =>
+          // The badge CSS uppercases its text; compare case-insensitively.
+          document.body.innerText
+            .toLowerCase()
+            .includes(
+              "agent chose terminal: the skill targets a terminal workflow",
+            ),
+        ),
+      { timeout: 5_000 },
+    )
+    .toBe(true);
+  // A human picker change clears the note (the controller clears it without
+  // a rationale option); restoring the theme for later visual checks.
   await executeTool(page, "appearance_set", { choice: "light" });
+  const cleared = await executeTool(page, "appearance_read", {});
+  expect(cleared.data.agentRationale).toBeNull();
 });
 
 test.afterAll(async () => {

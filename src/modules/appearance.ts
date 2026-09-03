@@ -16,10 +16,20 @@ export type AppearanceState = {
   readonly storedChoice: AppearanceChoice;
   readonly resolvedTheme: ConcreteTheme;
   readonly source: "system" | "explicit";
+  /**
+   * Why the current choice was set, when the setter explained itself.
+   * Human picker changes clear it; agent-supplied rationales are shown in the
+   * UI as a visible collaboration note. Browser preference metadata only:
+   * never Skill content, evidence, or snapshot payload.
+   */
+  readonly agentRationale: string | null;
 };
 export interface AppearanceController {
   readState(): AppearanceState;
-  setChoice(choice: AppearanceChoice): AppearanceState;
+  setChoice(
+    choice: AppearanceChoice,
+    options?: { agentRationale?: string },
+  ): AppearanceState;
   subscribe(listener: (state: AppearanceState) => void): () => void;
 }
 
@@ -38,7 +48,7 @@ const isChoice = (value: string | null): value is AppearanceChoice =>
   APPEARANCE_REGISTRY.some((item) => item.id === value);
 
 export function createBrowserAppearanceController(options?: {
-  storage?: Pick<Storage, "getItem" | "setItem">;
+  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   media?: Pick<
     MediaQueryList,
     "matches" | "addEventListener" | "removeEventListener"
@@ -54,6 +64,13 @@ export function createBrowserAppearanceController(options?: {
   let storedChoice: AppearanceChoice = isChoice(storage.getItem(STORAGE_KEY))
     ? (storage.getItem(STORAGE_KEY)! as AppearanceChoice)
     : "system";
+  let agentRationale: string | null = null;
+  const RATIONALE_KEY = "skill-canvas:appearance-rationale";
+  if (storedChoice !== "system") {
+    const stored = storage.getItem(RATIONALE_KEY);
+    agentRationale =
+      typeof stored === "string" && stored.trim() !== "" ? stored : null;
+  }
   const resolve = (): ConcreteTheme =>
     storedChoice === "system"
       ? media.matches
@@ -65,6 +82,7 @@ export function createBrowserAppearanceController(options?: {
     storedChoice,
     resolvedTheme: resolve(),
     source: storedChoice === "system" ? "system" : "explicit",
+    agentRationale,
   });
   const apply = (emit: boolean) => {
     root.dataset.theme = resolve();
@@ -84,11 +102,22 @@ export function createBrowserAppearanceController(options?: {
   apply(false);
   return {
     readState: state,
-    setChoice(choice) {
+    setChoice(choice, options) {
       if (!isChoice(choice))
         throw new Error(`Unknown appearance choice: ${choice}`);
       storedChoice = choice;
       storage.setItem(STORAGE_KEY, choice);
+      if (choice === "system" || options?.agentRationale === undefined) {
+        // A plain picker change clears any prior agent note; system mode has
+        // no explicit choice for an agent to have explained.
+        agentRationale = null;
+        storage.removeItem(RATIONALE_KEY);
+      } else {
+        const note = options!.agentRationale!.trim();
+        agentRationale = note === "" ? null : note.slice(0, 280);
+        if (agentRationale === null) storage.removeItem(RATIONALE_KEY);
+        else storage.setItem(RATIONALE_KEY, agentRationale);
+      }
       apply(true);
       return state();
     },
