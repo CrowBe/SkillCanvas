@@ -4,6 +4,13 @@ Skill Canvas is a proof-of-concept, browser-based Agent Skills workbench for the
 
 The user brings a browser agent: the agent supplies inference and semantic judgment; the deployed website makes the Skill legible. It renders intent, visualizes structural anatomy, lints deterministic properties, breaks an accepted semantic map into an instruction-load vector, records observed evaluations, compares revisions, and exports a portable evidence-free JSON snapshot. These are multiple angles on understanding and improving the same Skill, not a single opaque quality score.
 
+The core idea is **iterating on your Skill with your agent**, through two deliberate registers of WebMCP use:
+
+- **Tool calls (deterministic).** The site supplies ground truth: content-addressed revisions, versioned lint and structure artifacts, traceable diffs, strict evidence-free snapshot admission. The agent here is a well-typed remote control — reproducible facts, no opinions.
+- **Inference as a participant.** The agent authors the Skill, proposes the instruction map, answers the trigger battery with recorded rationales, drives the mock test run — and even sets the workspace theme, explaining itself in the UI. Every agent-supplied artifact is labelled as evidence, graded separately, and never imported; the site grades only what is deterministic about it.
+
+See [docs/agent-collaboration.md](docs/agent-collaboration.md) for the full two-register model, the per-tool split, and why the theme Easter egg is the same seam as Skill authoring pointed at the environment.
+
 There are no accounts, provider keys, server-side model gateway, teams, publishing flow, or whole-agent configuration. The static app remains fully useful when WebMCP is unavailable. IndexedDB is the current deployment-friendly persistence adapter, and the welcome screen lists workspaces saved in the current browser profile so they remain reachable after a session ends. This is not a claim that the product must remain local-first.
 
 ## Run it

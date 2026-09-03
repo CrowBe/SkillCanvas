@@ -223,6 +223,16 @@ await beat(page, 2000);
 await executeTool(page, "workspace_snapshot_export", {});
 await beat(page, 2500);
 
+// 11. The environment seam: the agent picks a theme and explains itself
+await executeTool(page, "appearance_set", {
+  choice: "terminal",
+  agentRationale: "The Skill targets a terminal workflow; Terminal suits it.",
+});
+await beat(page, 3000);
+// Hand the workspace back: a human override clears the agent's note.
+await executeTool(page, "appearance_set", { choice: "light" });
+await beat(page, 1500);
+
 // Close slowly so the final frame holds
 await page.waitForTimeout(1500);
 await page.close();

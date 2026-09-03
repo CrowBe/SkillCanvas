@@ -16,7 +16,11 @@ function appearance() {
     removeEventListener: vi.fn(),
   };
   return createBrowserAppearanceController({
-    storage: { getItem: () => null, setItem: vi.fn() },
+    storage: {
+      getItem: () => null,
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    },
     media,
     root: document.createElement("html"),
     eventTarget: new EventTarget(),
@@ -561,6 +565,34 @@ describe("WebMCP registration failures", () => {
 });
 
 describe("WebMCP envelope guarantees", () => {
+  it("appearance_set carries the agent rationale into the controller", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    let current: string | null = null;
+    const controller = appearance();
+    const handlers = createToolHandlers({
+      service,
+      appearance: controller,
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
+    });
+    const set = handlers.find((tool) => tool.name === "appearance_set")!;
+    const envelope = await execute(set, {
+      choice: "terminal",
+      agentRationale: "The Skill targets a terminal workflow.",
+    });
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data.agentRationale).toBe(
+      "The Skill targets a terminal workflow.",
+    );
+    expect(controller.readState().agentRationale).toBe(
+      "The Skill targets a terminal workflow.",
+    );
+  });
+
   it("returns the ok:false envelope when a tool handler throws", async () => {
     const service = createWorkspaceService(new MemoryWorkspaceStore());
     let current: string | null = null;

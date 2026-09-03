@@ -168,6 +168,14 @@ export function App({
   const [appearanceState, setAppearanceState] = useState<AppearanceState>(() =>
     appearance.readState(),
   );
+  // WebMCP appearance changes can land between first render and the
+  // subscription effect (the visiting agent does not wait for hydration).
+  // Resync once the subscription is in place so a missed change event
+  // cannot leave a stale badge or theme in the UI.
+  useEffect(() => {
+    setAppearanceState(appearance.readState());
+    return appearance.subscribe(setAppearanceState);
+  }, []);
   const [instructionJson, setInstructionJson] = useState(
     instructionMapDraft(1),
   );
@@ -186,7 +194,6 @@ export function App({
   const loadedEvaluationsRef = useRef<readonly EvaluationRecord[]>([]);
   const loadedWorkspaceIdRef = useRef<string | null>(null);
 
-  useEffect(() => appearance.subscribe(setAppearanceState), []);
   useEffect(() => {
     let cancelled = false;
     const currentId = sessionStorage.getItem("skill-canvas:open-workspace");
@@ -627,14 +634,25 @@ export function App({
                 ? "Browser fallback"
                 : "Detecting WebMCP"}
           </span>
+          {appearanceState.agentRationale && (
+            <span
+              className="badge"
+              title="Set by your agent through appearance_set"
+            >
+              Agent chose {appearanceState.storedChoice}:{" "}
+              {appearanceState.agentRationale}
+            </span>
+          )}
           <label className="theme-picker">
             <span className="sr-only">Appearance</span>
             <select
               aria-label="Appearance"
               value={appearanceState.storedChoice}
-              onChange={(event) =>
-                appearance.setChoice(event.target.value as any)
-              }
+              onChange={(event) => {
+                // A human picker change is an explicit override: any previous
+                // agent rationale no longer describes the current choice.
+                appearance.setChoice(event.target.value as any);
+              }}
             >
               {appearanceState.choices.map((choice) => (
                 <option key={choice.id} value={choice.id}>
