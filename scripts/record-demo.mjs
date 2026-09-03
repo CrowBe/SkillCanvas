@@ -81,7 +81,7 @@ const page = await context.newPage();
 
 // 1. Landing — the pitch
 await page.goto(ORIGIN);
-await page.waitForTimeout(3500);
+await page.waitForTimeout(5000);
 
 // 2. Load the example Skill in the UI so the human-visible path is on record
 await page.getByTestId("load-sample").click();
@@ -235,7 +235,7 @@ await executeTool(page, "appearance_set", { choice: "light" });
 await beat(page, 1500);
 
 // Close slowly so the final frame holds
-await page.waitForTimeout(1500);
+await page.waitForTimeout(4000);
 await page.close();
 await context.close();
 await browser.close();
