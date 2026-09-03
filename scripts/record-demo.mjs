@@ -14,7 +14,8 @@
 import { chromium } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 
-const ORIGIN = process.env.DEMO_ORIGIN ?? "https://skillcanvas.skillcanvas.workers.dev";
+const ORIGIN =
+  process.env.DEMO_ORIGIN ?? "https://skillcanvas.skillcanvas.workers.dev";
 const OUT_DIR = "demo-output";
 
 const GREETING_SKILL = `---
@@ -173,7 +174,7 @@ for (const c of prepared.data.data.cases) {
   );
   const choice = fire
     ? "candidate"
-    : c.choices.find((ch) => !ch.candidate)?.id ?? c.choices[0].id;
+    : (c.choices.find((ch) => !ch.candidate)?.id ?? c.choices[0].id);
   await executeTool(page, "evaluation_submit", {
     evaluationId: prepared.data.id,
     submission: {

@@ -123,7 +123,7 @@ selectedChoiceId, rationale}` per case; each envelope returns the next case.
 ## Verification
 
 - `WEBMCP_EVAL=1 npx playwright test tests/browser/webmcp-evals.spec.ts
-  --project=webmcp` → 8 passed.
+--project=webmcp` → 8 passed.
 - `npx playwright test --project=chromium` → evals skipped, rest passed.
 - `npm run typecheck && npm run lint && npm run format:check && npm test` →
   all clean (one pre-existing `App.tsx` exhaustive-deps warning is known).
