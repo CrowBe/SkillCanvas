@@ -496,6 +496,36 @@ describe("WebMCP adapter", () => {
     expect(result.error.code).toBe("internal_error");
     expect(result.error.message).toContain("mock persistence failed");
   });
+
+  it("accepts JSON-string inputs as Chrome 151's executeTool wire", async () => {
+    const service = createWorkspaceService(new MemoryWorkspaceStore());
+    let current: string | null = null;
+    const handlers = createToolHandlers({
+      service,
+      appearance: appearance(),
+      selection: {
+        get: () => current,
+        set: (id) => {
+          current = id;
+        },
+      },
+    });
+    const json = JSON.stringify({
+      skillMd:
+        "---\nname: demo-skill\ndescription: Use when a deterministic demo is requested.\n---\n\n# Demo\n\nFollow the workflow carefully.",
+    });
+    const opened = await (
+      handlers.find((item) => item.name === "skill_open")!.execute as any
+    )(json, { signal: new AbortController().signal });
+    expect(opened.ok).toBe(true);
+    // malformed JSON string that still parses but fails schema
+    const bad = await (
+      handlers.find((item) => item.name === "skill_open")!.execute as any
+    )(JSON.stringify({ name: {} }), {
+      signal: new AbortController().signal,
+    });
+    expect(bad.error.code).toBe("invalid_submission");
+  });
 });
 
 describe("WebMCP registration failures", () => {

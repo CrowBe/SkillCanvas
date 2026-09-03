@@ -58,6 +58,16 @@ type Runtime = {
   ) => void;
 };
 
+function normalizeWebMcpInput(input: unknown): unknown {
+  if (typeof input !== "string") return input;
+  if (input.trim() === "") return {};
+  try {
+    return JSON.parse(input);
+  } catch {
+    return input;
+  }
+}
+
 function guardTool(
   tool: WebMcpTool,
   selection: WorkspaceSelection,
@@ -66,9 +76,10 @@ function guardTool(
   return {
     ...tool,
     execute: async (input, options) => {
+      const normalized = normalizeWebMcpInput(input);
       try {
         if (tool.inputSchema) {
-          const issues = validateSchema(input, tool.inputSchema);
+          const issues = validateSchema(normalized, tool.inputSchema);
           if (issues.length > 0)
             return {
               protocolVersion: PROTOCOL_VERSION,
@@ -82,7 +93,7 @@ function guardTool(
               },
             };
         }
-        return await tool.execute(input, options);
+        return await tool.execute(normalized, options);
       } catch (error) {
         return {
           protocolVersion: PROTOCOL_VERSION,
