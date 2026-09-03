@@ -16,7 +16,6 @@ import { mkdirSync } from "node:fs";
 
 const ORIGIN =
   process.env.DEMO_ORIGIN ?? "https://skillcanvas.skillcanvas.workers.dev";
-const OUT_DIR = "demo-output";
 
 const GREETING_SKILL = `---
 name: greeting-scribe
@@ -52,8 +51,6 @@ const CONTRACT = {
     properties: { sentence: { type: "string" } },
   },
 };
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function executeTool(page, name, input = {}) {
   return page.evaluate(

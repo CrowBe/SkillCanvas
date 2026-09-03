@@ -29,4 +29,13 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Plain Node scripts (demo recorder): browser globals are intentional
+    // inside page.evaluate callbacks; Node globals come from the runtime.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: { ...globals.node, ...globals.browser },
+    },
+  },
 );
