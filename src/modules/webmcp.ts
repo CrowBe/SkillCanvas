@@ -201,7 +201,8 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
     {
       name: "skill_update",
       title: "Update Skill",
-      description: "Appends a full SKILL.md replacement from a base revision.",
+      description:
+        "Appends a full SKILL.md replacement from a base revision. baseRevision must equal the current tip revision; a stale value returns revision_conflict and never overwrites.",
       inputSchema: {
         type: "object",
         required: ["baseRevision", "skillMd"],
@@ -256,7 +257,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       name: "instruction_map_submit",
       title: "Submit Instruction Map",
       description:
-        "Validates a visiting-agent instruction map pinned to the current revision.",
+        'Validates a visiting-agent instruction map pinned to the current revision. The map object requires: status "proposed"; revision equal to the current tip; scopes[] as {id, label, parentId?}; requirements[] as {id, sourceSpan: {start, end}, statement, kind ("action"|"constraint"|"condition"|"prohibition"|"preference"), scopeId (an existing scope id), dependencies[] (other requirement ids), verifiability ("deterministic"|"semantic-judgment"|"unverified")}. Every sourceSpan must select non-empty text within the current SKILL.md. Submit with accept:false to store it as a proposal; acceptance is an explicit human action.',
       inputSchema: {
         type: "object",
         required: ["map"],
@@ -278,7 +279,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       name: "evaluation_prepare",
       title: "Prepare Evaluation",
       description:
-        "Prepares a triggering evaluation or mocked test run for the current revision.",
+        'Prepares a triggering evaluation or mocked test run for the current revision. kind "triggering" takes no extra fields and returns one prompt case; kind "test-run" requires contract: {name, description, inputSchema (JSON Schema), outputSchema (JSON Schema — required by the workbench validator), mockOutput?}. The tool\'s optional responseSchema property is ignored; put output expectations in contract.outputSchema. A test-run also registers a run-scoped mock tool named mock_<contract>_<id> for deterministic invocation.',
       inputSchema: {
         type: "object",
         required: ["kind"],
@@ -336,7 +337,7 @@ export function createToolHandlers(runtime: Runtime): readonly WebMcpTool[] {
       name: "evaluation_submit",
       title: "Submit Evaluation Evidence",
       description:
-        "Records one visiting-agent judgment or final test-run output and grades deterministic properties.",
+        'Records one visiting-agent judgment or final test-run output and grades deterministic properties. Triggering: submit ONE case at a time as {kind: "triggering", caseId, selectedChoiceId (a choice id from that case), rationale} — batched case arrays are refused; each envelope returns the next case; the run completes after the last case. Test-run: {kind: "test-run", finalOutput} must match contract.outputSchema.',
       inputSchema: {
         type: "object",
         required: ["evaluationId", "submission"],
