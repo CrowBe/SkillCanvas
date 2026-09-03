@@ -39,3 +39,13 @@ jobs:
 
       - name: Build production bundle
         run: npm run build
+
+      # README "Verification" includes npm run test:browser. The always-on
+      # fallback spec (load -> lint -> revise -> compare -> export, no WebMCP)
+      # runs here; visual smokes stay local-only because toHaveScreenshot
+      # snapshots are only stable on a pinned OS/browser (see issue #7).
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright browser lane (fallback, no WebMCP)
+        run: npx playwright test tests/browser/workbench.spec.ts --project=chromium
