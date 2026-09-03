@@ -46,6 +46,7 @@ import {
 const store = new IndexedDbWorkspaceStore();
 const service = createWorkspaceService(store);
 const appearance = createBrowserAppearanceController();
+let webMcpMountChain: Promise<unknown> = Promise.resolve();
 const instructionMapDraft = (revision: number) =>
   JSON.stringify(
     {
@@ -213,39 +214,45 @@ export function App({
       set: (id: string) =>
         sessionStorage.setItem("skill-canvas:open-workspace", id),
     };
-    registerWebMcpTools(document.modelContext, {
-      service: workspaceService,
-      appearance,
-      selection,
-      onWorkspaceChange: loadBundle,
-      onMockRegistrationChange: (evaluationId, nextStatus) =>
-        setMockRegistrations((current) => ({
-          ...current,
-          [evaluationId]: nextStatus,
-        })),
-      download,
-    })
-      .then((registration) => {
-        if (cancelled) {
-          registration.dispose();
-          return;
-        }
-        registrationRef.current = registration;
-        registration.reconcileMockRegistrations(
-          loadedWorkspaceIdRef.current,
-          loadedEvaluationsRef.current,
-        );
-        setWebMcp(registration.available ? "available" : "fallback");
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setWebMcp("fallback");
-        setStatus(`WebMCP registration failed: ${message(error)}`);
+    const mount = webMcpMountChain.then(async () => {
+      if (cancelled) return;
+      const registration = await registerWebMcpTools(document.modelContext, {
+        service: workspaceService,
+        appearance,
+        selection,
+        onWorkspaceChange: loadBundle,
+        onMockRegistrationChange: (evaluationId, nextStatus) =>
+          setMockRegistrations((current) => ({
+            ...current,
+            [evaluationId]: nextStatus,
+          })),
+        download,
       });
+      if (cancelled) {
+        registration.dispose();
+        await Promise.resolve();
+        return;
+      }
+      registrationRef.current = registration;
+      registration.reconcileMockRegistrations(
+        loadedWorkspaceIdRef.current,
+        loadedEvaluationsRef.current,
+      );
+      setWebMcp(registration.available ? "available" : "fallback");
+    });
+    webMcpMountChain = mount.catch(() => undefined);
+    mount.catch((error) => {
+      if (cancelled) return;
+      setWebMcp("fallback");
+      setStatus(`WebMCP registration failed: ${message(error)}`);
+    });
     return () => {
       cancelled = true;
       registrationRef.current?.dispose();
       registrationRef.current = null;
+      webMcpMountChain = webMcpMountChain.then(async () => {
+        await Promise.resolve();
+      });
     };
   }, []);
 

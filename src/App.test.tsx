@@ -101,12 +101,29 @@ describe("App WebMCP registration lifecycle", () => {
   });
 
   it("leaves exactly one live registration per tool under StrictMode", async () => {
-    const live = new Map<string, number>();
+    const live = new Map<string, AbortSignal>();
     const context: ModelContextAdapter = {
       async registerTool(tool: WebMcpTool, options) {
-        live.set(tool.name, (live.get(tool.name) ?? 0) + 1);
-        options?.signal?.addEventListener("abort", () =>
-          live.set(tool.name, (live.get(tool.name) ?? 0) - 1),
+        if (live.has(tool.name)) {
+          const error = new Error("Duplicate tool name");
+          error.name = "InvalidStateError";
+          throw error;
+        }
+        const signal = options?.signal;
+        if (signal?.aborted) {
+          const error = new Error("The operation was aborted.");
+          error.name = "AbortError";
+          throw error;
+        }
+        live.set(tool.name, signal ?? new AbortController().signal);
+        signal?.addEventListener(
+          "abort",
+          () => {
+            queueMicrotask(() => {
+              if (live.get(tool.name) === signal) live.delete(tool.name);
+            });
+          },
+          { once: true },
         );
         return undefined;
       },
@@ -120,8 +137,14 @@ describe("App WebMCP registration lifecycle", () => {
         </StrictMode>,
       );
     });
+    expect(await screen.findByText("WebMCP tools live")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/WebMCP registration failed: Duplicate tool name/),
+    ).not.toBeInTheDocument();
     expect(live.size).toBeGreaterThan(0);
-    expect([...live.values()].every((count) => count === 1)).toBe(true);
+    expect([...live.keys()]).toEqual(
+      expect.arrayContaining(["skill_open", "skill_analyze"]),
+    );
   });
 
   it("reopens a durable workspace without a session selection", async () => {
