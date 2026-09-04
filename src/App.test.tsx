@@ -99,7 +99,7 @@ describe("App WebMCP registration lifecycle", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Visiting agent final JSON" }),
+      screen.getByRole("textbox", { name: "Submitted agent final JSON" }),
     ).toHaveValue("{}");
   });
 

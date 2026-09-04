@@ -1278,7 +1278,7 @@ function EvaluationPanel(props: EvaluationPanelProps) {
             <strong>
               {passed}/{data.cases.length} passed
             </strong>
-            <p>Observed from the visiting browser agent.</p>
+            <p>Submitted agent observations.</p>
           </div>
         )}
         <button onClick={props.onPrepareTrigger}>
@@ -1325,7 +1325,7 @@ function EvaluationPanel(props: EvaluationPanelProps) {
         )}
       </div>
       <label>
-        Visiting agent final JSON
+        Submitted agent final JSON
         <textarea
           className="json-editor short"
           value={submittedFinalOutput ?? props.finalOutput}

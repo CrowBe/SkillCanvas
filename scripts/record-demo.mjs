@@ -91,6 +91,14 @@ if (!video) throw new Error("Playwright video recording did not start.");
 // 1. Landing — the pitch
 await page.goto(ORIGIN);
 await page.waitForTimeout(5000);
+await page.evaluate(() => {
+  const banner = document.createElement("div");
+  banner.textContent =
+    "Synthetic demo-agent evidence: deterministic trigger choices + final JSON";
+  banner.style.cssText =
+    "position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:420px;padding:10px 14px;border-radius:999px;background:#141414;color:#fff;font:600 13px/1.25 system-ui;box-shadow:0 4px 18px #0005";
+  document.body.append(banner);
+});
 
 // 2. Load the example Skill in the UI so the human-visible path is on record
 await page.getByTestId("load-sample").click();
@@ -251,7 +259,7 @@ await executeTool(page, "appearance_set", { choice: "light" });
 await beat(page, 1500);
 
 // Close slowly so the final frame holds
-await page.waitForTimeout(4000);
+await page.waitForTimeout(10000);
 await page.close();
 await context.close();
 await browser.close();

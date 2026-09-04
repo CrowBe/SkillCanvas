@@ -1,24 +1,29 @@
 # Demo narration script
 
-Voiceover for `skill-canvas-demo-narrated.mp4` (recorded by
-`scripts/record-demo.mjs`, ~47 s). Segments were generated with OpenAI TTS and
-placed at the listed offsets with ffmpeg. Keep copy short: nine segments must
-fit the video with no overlap.
+Voiceover for `demo-output/skill-canvas-demo-narrated.mp4` (about one minute).
+The deterministic recording labels its hard-coded trigger choices and final
+JSON as synthetic demo-agent evidence; a normal interactive run receives those
+judgments from the visiting browser agent.
 
-| #   | Start (s) | Copy                                                                                                      |
-| --- | --------- | --------------------------------------------------------------------------------------------------------- |
-| 1   | 1.0       | Skill Canvas makes invisible agent skills legible.                                                        |
-| 2   | 5.6       | Load any skill; the workbench renders intent, anatomy, and lint.                                          |
-| 3   | 10.6      | A browser agent discovers twelve page-local WebMCP tools, then authors a skill live.                      |
-| 4   | 15.2      | The site grades the deterministic facts.                                                                  |
-| 5   | 18.1      | Your agent proposes an instruction map — the site validates every span and dependency.                    |
-| 6   | 23.5      | Evaluations split the same way: your agent answers; the site grades.                                      |
-| 7   | 28.2      | A mocked test run checks every call against its contract.                                                 |
-| 8   | 32.1      | Revise, compare, export evidence-free.                                                                    |
-| 9   | 36.6      | The same agent seam even picks your theme, and says why. Iterate on skills with your agent. Skill Canvas. |
+| #   | Start (s) | Copy                                                                                                                      |
+| --- | --------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 1.0       | Skill Canvas makes invisible agent skills legible.                                                                        |
+| 2   | 5.6       | Load any skill; the workbench renders intent, anatomy, and lint.                                                          |
+| 3   | 10.6      | A browser agent discovers twelve page-local WebMCP tools. This recording uses synthetic demo-agent evidence.              |
+| 4   | 16.8      | Open, read, update, and analyze shape the skill. Instruction-map submit records requirements.                             |
+| 5   | 23.4      | Evaluation prepare and submit run triggering and mock checks. Compare and snapshot export preserve the result.            |
+| 6   | 31.2      | Snapshot import restores workspaces. Appearance read inspects the theme, and appearance set changes it.                   |
+| 7   | 38.5      | The walkthrough demonstrates that grouped core workflow rather than showing every tool individually.                      |
+| 8   | 44.2      | The site validates spans, grades deterministic facts, and checks every mock call against its contract.                    |
+| 9   | 50.8      | In normal use, the visiting agent supplies the judgments and final JSON. Iterate on skills with your agent. Skill Canvas. |
 
-Re-record flow: `node scripts/record-demo.mjs`, then regenerate the nine
-segments with the TTS tool (OpenAI, default voice), atempo 1.09 each, place at
-the offsets above with `adelay` + `amix`, mux with
-`ffmpeg -i skill-canvas-demo.webm -i narration-track.mp3 -c:v libopenh264
--b:v 2500k -c:a aac` (no libx264 in this ffmpeg build).
+From the repository root, record and build the synchronized, music-free MP4:
+
+```bash
+node scripts/record-demo.mjs
+OPENAI_API_KEY=... node scripts/build-demo-narration.mjs
+```
+
+The second command generates the nine speech segments at the offsets above and
+muxes them with the deterministic input video. Its explicit output is
+`demo-output/skill-canvas-demo-narrated.mp4`.
