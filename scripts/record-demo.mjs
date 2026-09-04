@@ -108,6 +108,26 @@ await page.waitForTimeout(3000);
 const toolNames = await page.evaluate(async () =>
   (await document.modelContext.getTools()).map((t) => t.name),
 );
+const expectedToolNames = [
+  "appearance_read",
+  "appearance_set",
+  "evaluation_prepare",
+  "evaluation_submit",
+  "instruction_map_submit",
+  "skill_analyze",
+  "skill_compare",
+  "skill_open",
+  "skill_read",
+  "skill_update",
+  "workspace_snapshot_export",
+  "workspace_snapshot_import",
+];
+const discoveredToolNames = [...toolNames].sort();
+if (JSON.stringify(discoveredToolNames) !== JSON.stringify(expectedToolNames)) {
+  throw new Error(
+    `Expected the exact 12-tool WebMCP contract; discovered ${JSON.stringify(discoveredToolNames)}.`,
+  );
+}
 console.log("registered:", toolNames.length, "tools");
 
 // 4. Agent authors a Skill through skill_open

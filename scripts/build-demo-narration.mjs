@@ -72,7 +72,8 @@ const delayed = segments.map(
   ([start], index) =>
     `[${index + 1}:a]adelay=${Math.round(start * 1000)}:all=1[a${index}]`,
 );
-const mixed = `${audioPaths.map((_, index) => `[a${index}]`).join("")}amix=inputs=${audioPaths.length}:duration=longest:normalize=0,apad[narration]`;
+const heldVideo = "[0:v]tpad=stop_mode=clone:stop_duration=15[video]";
+const mixed = `${audioPaths.map((_, index) => `[a${index}]`).join("")}amix=inputs=${audioPaths.length}:duration=longest:normalize=0[narration]`;
 const ffmpeg = spawnSync(
   "ffmpeg",
   [
@@ -81,9 +82,9 @@ const ffmpeg = spawnSync(
     inputPath,
     ...audioPaths.flatMap((path) => ["-i", path]),
     "-filter_complex",
-    [...delayed, mixed].join(";"),
+    [heldVideo, ...delayed, mixed].join(";"),
     "-map",
-    "0:v:0",
+    "[video]",
     "-map",
     "[narration]",
     "-c:v",
