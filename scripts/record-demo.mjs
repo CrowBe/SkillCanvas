@@ -12,7 +12,7 @@
  * Output: ./demo-output/skill-canvas-demo.webm
  */
 import { chromium } from "@playwright/test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, renameSync } from "node:fs";
 
 const ORIGIN =
   process.env.DEMO_ORIGIN ?? "https://skillcanvas.skillcanvas.workers.dev";
@@ -64,6 +64,13 @@ async function executeTool(page, name, input = {}) {
   );
 }
 
+function promptMatchesCandidate(triggerCase) {
+  const candidate = triggerCase.choices.find((choice) => choice.candidate);
+  const terms = candidate?.description.toLowerCase().match(/[a-z]+/g) ?? [];
+  const prompt = triggerCase.prompt.toLowerCase();
+  return terms.some((term) => term.length > 4 && prompt.includes(term));
+}
+
 /** Lets a viewer read what just happened. */
 const beat = (page, ms = 2200) => page.waitForTimeout(ms);
 
@@ -78,10 +85,20 @@ const context = await browser.newContext({
   recordVideo: { dir: "demo-output", size: { width: 1280, height: 800 } },
 });
 const page = await context.newPage();
+const video = page.video();
+if (!video) throw new Error("Playwright video recording did not start.");
 
 // 1. Landing — the pitch
 await page.goto(ORIGIN);
 await page.waitForTimeout(5000);
+await page.evaluate(() => {
+  const banner = document.createElement("div");
+  banner.textContent =
+    "Synthetic demo-agent evidence: deterministic trigger choices + final JSON";
+  banner.style.cssText =
+    "position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:420px;padding:10px 14px;border-radius:999px;background:#141414;color:#fff;font:600 13px/1.25 system-ui;box-shadow:0 4px 18px #0005";
+  document.body.append(banner);
+});
 
 // 2. Load the example Skill in the UI so the human-visible path is on record
 await page.getByTestId("load-sample").click();
@@ -91,6 +108,26 @@ await page.waitForTimeout(3000);
 const toolNames = await page.evaluate(async () =>
   (await document.modelContext.getTools()).map((t) => t.name),
 );
+const expectedToolNames = [
+  "appearance_read",
+  "appearance_set",
+  "evaluation_prepare",
+  "evaluation_submit",
+  "instruction_map_submit",
+  "skill_analyze",
+  "skill_compare",
+  "skill_open",
+  "skill_read",
+  "skill_update",
+  "workspace_snapshot_export",
+  "workspace_snapshot_import",
+];
+const discoveredToolNames = [...toolNames].sort();
+if (JSON.stringify(discoveredToolNames) !== JSON.stringify(expectedToolNames)) {
+  throw new Error(
+    `Expected the exact 12-tool WebMCP contract; discovered ${JSON.stringify(discoveredToolNames)}.`,
+  );
+}
 console.log("registered:", toolNames.length, "tools");
 
 // 4. Agent authors a Skill through skill_open
@@ -165,14 +202,13 @@ await beat(page, 1200);
 const prepared = await executeTool(page, "evaluation_prepare", {
   kind: "triggering",
 });
+let triggerResult;
 for (const c of prepared.data.data.cases) {
-  const fire = ["greeting", "salutation", "opening line", "polite"].some((w) =>
-    c.prompt.toLowerCase().includes(w),
-  );
+  const fire = promptMatchesCandidate(c);
   const choice = fire
     ? "candidate"
     : (c.choices.find((ch) => !ch.candidate)?.id ?? c.choices[0].id);
-  await executeTool(page, "evaluation_submit", {
+  triggerResult = await executeTool(page, "evaluation_submit", {
     evaluationId: prepared.data.id,
     submission: {
       kind: "triggering",
@@ -185,6 +221,14 @@ for (const c of prepared.data.data.cases) {
   });
   await page.waitForTimeout(900);
 }
+const observations = triggerResult?.data?.data?.observations ?? [];
+if (
+  observations.length !== prepared.data.data.cases.length ||
+  observations.some((observation) => !observation.passed)
+) {
+  throw new Error("Demo triggering evaluation did not pass every case.");
+}
+console.log("trigger score:", `${observations.length}/${observations.length}`);
 await beat(page, 2500);
 
 // 8. Test run: mock tool registered, invoked, graded
@@ -235,8 +279,11 @@ await executeTool(page, "appearance_set", { choice: "light" });
 await beat(page, 1500);
 
 // Close slowly so the final frame holds
-await page.waitForTimeout(4000);
+await page.waitForTimeout(10000);
 await page.close();
 await context.close();
 await browser.close();
-console.log("recorded demo-output/*.webm");
+const rawVideoPath = await video.path();
+const outputPath = "demo-output/skill-canvas-demo.webm";
+renameSync(rawVideoPath, outputPath);
+console.log(`recorded ${outputPath}`);

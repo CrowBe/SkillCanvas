@@ -142,6 +142,13 @@ Playwright's built-in `recordVideo` captures the browser content itself, so it
 works on Wayland where desktop screen capture is portal-gated (GNOME's
 Screenshot D-Bus API denies non-interactive callers and no
 `gpu-screen-recorder`/`wf-recorder` is installed). Output:
-`demo-output/skill-canvas-demo.webm` (~35-40 s at 1280x800; gitignored).
-Add narration and music externally; the rules require a public YouTube video
-under three minutes with audio.
+`demo-output/skill-canvas-demo.webm` (about one minute at 1280x800; gitignored).
+The recorder visibly labels its deterministic trigger choices and final JSON as
+synthetic demo-agent evidence; a normal interactive run gets those judgments
+from the visiting agent. It demonstrates the core grouped workflow while all 12
+tools remain discoverable; snapshot import and appearance read are explained in
+the narration rather than individually invoked. Generate synchronized narration
+with `OPENAI_API_KEY=... node scripts/build-demo-narration.mjs`. The music-free
+output is `demo-output/skill-canvas-demo-narrated.mp4`, safely under three
+minutes. The exact narration and workflow are documented in
+`docs/demo-narration.md`.

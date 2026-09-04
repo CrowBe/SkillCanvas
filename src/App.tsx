@@ -1278,7 +1278,7 @@ function EvaluationPanel(props: EvaluationPanelProps) {
             <strong>
               {passed}/{data.cases.length} passed
             </strong>
-            <p>Observed from the visiting browser agent.</p>
+            <p>Submitted agent observations.</p>
           </div>
         )}
         <button onClick={props.onPrepareTrigger}>
@@ -1288,6 +1288,8 @@ function EvaluationPanel(props: EvaluationPanelProps) {
     );
   }
   const data = evaluation.data;
+  const submittedFinalOutput =
+    data.finalOutput === undefined ? null : JSON.stringify(data.finalOutput);
   return (
     <div className="panel-stack">
       <div className="run-meta">
@@ -1323,14 +1325,19 @@ function EvaluationPanel(props: EvaluationPanelProps) {
         )}
       </div>
       <label>
-        Visiting agent final JSON
+        Submitted agent final JSON
         <textarea
           className="json-editor short"
-          value={props.finalOutput}
+          value={submittedFinalOutput ?? props.finalOutput}
+          disabled={submittedFinalOutput !== null}
           onChange={(event) => props.setFinalOutput(event.target.value)}
         />
       </label>
-      <button className="primary" onClick={props.onSubmitFinal}>
+      <button
+        className="primary"
+        disabled={submittedFinalOutput !== null}
+        onClick={props.onSubmitFinal}
+      >
         Submit final output
       </button>
       {data.checks && (
