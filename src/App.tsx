@@ -1288,6 +1288,8 @@ function EvaluationPanel(props: EvaluationPanelProps) {
     );
   }
   const data = evaluation.data;
+  const submittedFinalOutput =
+    data.finalOutput === undefined ? null : JSON.stringify(data.finalOutput);
   return (
     <div className="panel-stack">
       <div className="run-meta">
@@ -1326,11 +1328,16 @@ function EvaluationPanel(props: EvaluationPanelProps) {
         Visiting agent final JSON
         <textarea
           className="json-editor short"
-          value={props.finalOutput}
+          value={submittedFinalOutput ?? props.finalOutput}
+          disabled={submittedFinalOutput !== null}
           onChange={(event) => props.setFinalOutput(event.target.value)}
         />
       </label>
-      <button className="primary" onClick={props.onSubmitFinal}>
+      <button
+        className="primary"
+        disabled={submittedFinalOutput !== null}
+        onClick={props.onSubmitFinal}
+      >
         Submit final output
       </button>
       {data.checks && (

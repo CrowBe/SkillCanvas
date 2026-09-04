@@ -81,6 +81,16 @@ function errorCode(envelope: Envelope): string {
   return envelope.error!.code;
 }
 
+function promptMatchesCandidate(triggerCase: {
+  prompt: string;
+  choices: { candidate: boolean; description: string }[];
+}): boolean {
+  const candidate = triggerCase.choices.find((choice) => choice.candidate);
+  const terms = candidate?.description.toLowerCase().match(/[a-z]+/g) ?? [];
+  const prompt = triggerCase.prompt.toLowerCase();
+  return terms.some((term) => term.length > 4 && prompt.includes(term));
+}
+
 let _webmcpAvailabilityObserved = false;
 
 /**
@@ -351,7 +361,12 @@ test("triggering evaluation: prepare, one case at a time, graded", async ({
     id: string;
     prompt: string;
     expected: "fire" | "silent";
-    choices: { id: string; candidate: boolean; name: string }[];
+    choices: {
+      id: string;
+      candidate: boolean;
+      name: string;
+      description: string;
+    }[];
   }[];
   expect(cases.length).toBeGreaterThan(0);
 
@@ -366,11 +381,9 @@ test("triggering evaluation: prepare, one case at a time, graded", async ({
   expect(batched.ok).toBe(false);
   expect(errorCode(batched)).toBe("invalid_submission");
 
+  let completed: Envelope | undefined;
   for (const triggerCase of cases) {
-    const prompt = triggerCase.prompt.toLowerCase();
-    const fire = ["greeting", "salutation", "opening line", "polite"].some(
-      (word) => prompt.includes(word),
-    );
+    const fire = promptMatchesCandidate(triggerCase);
     const choice = fire
       ? "candidate"
       : (triggerCase.choices.find((c) => !c.candidate)?.id ??
@@ -388,7 +401,15 @@ test("triggering evaluation: prepare, one case at a time, graded", async ({
     });
     expect(submitted.ok, JSON.stringify(submitted.error ?? {})).toBe(true);
     expect(["in-progress", "complete"]).toContain(submitted.data.status);
+    completed = submitted;
   }
+  expect(completed?.data.status).toBe("complete");
+  expect(completed?.data.data.observations).toHaveLength(cases.length);
+  expect(
+    completed?.data.data.observations.every(
+      (observation: { passed: boolean }) => observation.passed,
+    ),
+  ).toBe(true);
 });
 
 test("test run: contract prepare, run-scoped mock, deterministic grading", async ({

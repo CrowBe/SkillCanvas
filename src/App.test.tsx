@@ -98,6 +98,9 @@ describe("App WebMCP registration lifecycle", () => {
         "This run is complete; its run-scoped mock tool is unregistered.",
       ),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Visiting agent final JSON" }),
+    ).toHaveValue("{}");
   });
 
   it("leaves exactly one live registration per tool under StrictMode", async () => {

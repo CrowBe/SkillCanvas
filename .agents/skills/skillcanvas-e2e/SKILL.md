@@ -142,6 +142,7 @@ Playwright's built-in `recordVideo` captures the browser content itself, so it
 works on Wayland where desktop screen capture is portal-gated (GNOME's
 Screenshot D-Bus API denies non-interactive callers and no
 `gpu-screen-recorder`/`wf-recorder` is installed). Output:
-`demo-output/skill-canvas-demo.webm` (~35-40 s at 1280x800; gitignored).
-Add narration and music externally; the rules require a public YouTube video
-under three minutes with audio.
+`demo-output/skill-canvas-demo.webm` (~47 s at 1280x800; gitignored).
+Add narration externally; optional music must be material the entrant has
+permission to use. The rules require a public YouTube video under three minutes
+with audio.

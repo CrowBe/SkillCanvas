@@ -9,7 +9,7 @@ fit the video with no overlap.
 | --- | --------- | --------------------------------------------------------------------------------------------------------- |
 | 1   | 1.0       | Skill Canvas makes invisible agent skills legible.                                                        |
 | 2   | 5.6       | Load any skill; the workbench renders intent, anatomy, and lint.                                          |
-| 3   | 10.6      | Then your agent authors a new skill, live, through WebMCP tools.                                          |
+| 3   | 10.6      | A browser agent discovers twelve page-local WebMCP tools, then authors a skill live.                      |
 | 4   | 15.2      | The site grades the deterministic facts.                                                                  |
 | 5   | 18.1      | Your agent proposes an instruction map — the site validates every span and dependency.                    |
 | 6   | 23.5      | Evaluations split the same way: your agent answers; the site grades.                                      |

@@ -12,7 +12,7 @@
  * Output: ./demo-output/skill-canvas-demo.webm
  */
 import { chromium } from "@playwright/test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, renameSync } from "node:fs";
 
 const ORIGIN =
   process.env.DEMO_ORIGIN ?? "https://skillcanvas.skillcanvas.workers.dev";
@@ -64,6 +64,13 @@ async function executeTool(page, name, input = {}) {
   );
 }
 
+function promptMatchesCandidate(triggerCase) {
+  const candidate = triggerCase.choices.find((choice) => choice.candidate);
+  const terms = candidate?.description.toLowerCase().match(/[a-z]+/g) ?? [];
+  const prompt = triggerCase.prompt.toLowerCase();
+  return terms.some((term) => term.length > 4 && prompt.includes(term));
+}
+
 /** Lets a viewer read what just happened. */
 const beat = (page, ms = 2200) => page.waitForTimeout(ms);
 
@@ -78,6 +85,8 @@ const context = await browser.newContext({
   recordVideo: { dir: "demo-output", size: { width: 1280, height: 800 } },
 });
 const page = await context.newPage();
+const video = page.video();
+if (!video) throw new Error("Playwright video recording did not start.");
 
 // 1. Landing — the pitch
 await page.goto(ORIGIN);
@@ -165,14 +174,13 @@ await beat(page, 1200);
 const prepared = await executeTool(page, "evaluation_prepare", {
   kind: "triggering",
 });
+let triggerResult;
 for (const c of prepared.data.data.cases) {
-  const fire = ["greeting", "salutation", "opening line", "polite"].some((w) =>
-    c.prompt.toLowerCase().includes(w),
-  );
+  const fire = promptMatchesCandidate(c);
   const choice = fire
     ? "candidate"
     : (c.choices.find((ch) => !ch.candidate)?.id ?? c.choices[0].id);
-  await executeTool(page, "evaluation_submit", {
+  triggerResult = await executeTool(page, "evaluation_submit", {
     evaluationId: prepared.data.id,
     submission: {
       kind: "triggering",
@@ -185,6 +193,14 @@ for (const c of prepared.data.data.cases) {
   });
   await page.waitForTimeout(900);
 }
+const observations = triggerResult?.data?.data?.observations ?? [];
+if (
+  observations.length !== prepared.data.data.cases.length ||
+  observations.some((observation) => !observation.passed)
+) {
+  throw new Error("Demo triggering evaluation did not pass every case.");
+}
+console.log("trigger score:", `${observations.length}/${observations.length}`);
 await beat(page, 2500);
 
 // 8. Test run: mock tool registered, invoked, graded
@@ -239,4 +255,7 @@ await page.waitForTimeout(4000);
 await page.close();
 await context.close();
 await browser.close();
-console.log("recorded demo-output/*.webm");
+const rawVideoPath = await video.path();
+const outputPath = "demo-output/skill-canvas-demo.webm";
+renameSync(rawVideoPath, outputPath);
+console.log(`recorded ${outputPath}`);
